@@ -7,11 +7,6 @@ use std::sync::{Condvar, Mutex};
 pub trait Msg: Send + Sync + 'static {}
 impl<T: Send + Sync + 'static> Msg for T {}
 
-enum Wrapper<T: Msg> {
-    Msg(T),
-    Disconnected,
-}
-
 #[derive(Copy, Clone, Debug)]
 pub enum RecvError {
     Empty,
@@ -47,7 +42,7 @@ impl<T: Msg> Shared<T> {
     fn wait(&self) {
         self.listeners.fetch_add(1, Ordering::Relaxed);
         {
-            let mut disconnected = self.disconnected.lock().unwrap();
+            let disconnected = self.disconnected.lock().unwrap();
 
             if !*disconnected {
                 let _ = self.trigger.wait(disconnected).unwrap();
