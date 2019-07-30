@@ -7,10 +7,10 @@ fn send_recv() {
     }
 
     for i in 0..1000 {
-        assert_eq!(rx.try_recv(), Some(i));
+        assert_eq!(rx.try_recv().unwrap(), i);
     }
 
-    assert!(rx.try_recv().is_none());
+    assert!(rx.try_recv().is_err());
 }
 
 #[test]
