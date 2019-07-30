@@ -21,7 +21,7 @@ trait Receiver: Send + Sized + 'static {
     fn iter(&mut self) -> Box<dyn Iterator<Item=Self::Item> + '_>;
 }
 
-impl<T: Send + Sync + Default + 'static> Sender for flume::Sender<T> {
+impl<T: Send + Default + 'static> Sender for flume::Sender<T> {
     type Item = T;
     type Receiver = flume::Receiver<T>;
 
@@ -34,7 +34,7 @@ impl<T: Send + Sync + Default + 'static> Sender for flume::Sender<T> {
     }
 }
 
-impl<T: Send + Sync + Default + 'static> Receiver for flume::Receiver<T> {
+impl<T: Send + Default + 'static> Receiver for flume::Receiver<T> {
     type Item = T;
 
     fn recv(&mut self) -> Self::Item {
@@ -46,7 +46,7 @@ impl<T: Send + Sync + Default + 'static> Receiver for flume::Receiver<T> {
     }
 }
 
-impl<T: Send + Sync + Default + 'static> Sender for crossbeam_channel::Sender<T> {
+impl<T: Send + Default + 'static> Sender for crossbeam_channel::Sender<T> {
     type Item = T;
     type Receiver = crossbeam_channel::Receiver<T>;
 
@@ -59,7 +59,7 @@ impl<T: Send + Sync + Default + 'static> Sender for crossbeam_channel::Sender<T>
     }
 }
 
-impl<T: Send + Sync + Default + 'static> Receiver for crossbeam_channel::Receiver<T> {
+impl<T: Send + Default + 'static> Receiver for crossbeam_channel::Receiver<T> {
     type Item = T;
 
     fn recv(&mut self) -> Self::Item {
@@ -71,7 +71,7 @@ impl<T: Send + Sync + Default + 'static> Receiver for crossbeam_channel::Receive
     }
 }
 
-impl<T: Send + Sync + Default + 'static> Sender for mpsc::Sender<T> {
+impl<T: Send + Default + 'static> Sender for mpsc::Sender<T> {
     type Item = T;
     type Receiver = mpsc::Receiver<T>;
 
@@ -84,7 +84,7 @@ impl<T: Send + Sync + Default + 'static> Sender for mpsc::Sender<T> {
     }
 }
 
-impl<T: Send + Sync + Default + 'static> Receiver for mpsc::Receiver<T> {
+impl<T: Send + Default + 'static> Receiver for mpsc::Receiver<T> {
     type Item = T;
 
     fn recv(&mut self) -> Self::Item {

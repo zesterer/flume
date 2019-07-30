@@ -9,10 +9,14 @@ edition = "2018"
 [dependencies]
 spin = "0.5"
 parking_lot = "0.9"
+deque = "0.3"
 
 [dev-dependencies]
 crossbeam-channel = "0.3"
 criterion = "0.2"
+
+[profile.release]
+debug = true
 
 [[bench]]
 name = "basic"

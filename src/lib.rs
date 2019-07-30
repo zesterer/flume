@@ -4,8 +4,8 @@ use std::{
 };
 use std::sync::{Condvar, Mutex};
 
-pub trait Msg: Send + Sync + 'static {}
-impl<T: Send + Sync + 'static> Msg for T {}
+pub trait Msg: Send + 'static {}
+impl<T: Send + 'static> Msg for T {}
 
 #[derive(Copy, Clone, Debug)]
 pub enum RecvError {
