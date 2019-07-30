@@ -3,7 +3,7 @@
 extern crate test;
 
 use std::sync::mpsc;
-use test::Bencher;
+use test::{Bencher, black_box};
 
 #[bench]
 fn flume(b: &mut Bencher) {
@@ -14,8 +14,8 @@ fn flume(b: &mut Bencher) {
             tx.send(i);
         }
 
-        for (i, msg) in rx.try_iter().enumerate() {
-            assert_eq!(msg, i);
+        for msg in rx.try_iter() {
+            black_box(msg);
         }
         assert!(rx.try_recv().is_none());
     });
@@ -30,8 +30,8 @@ fn crossbeam(b: &mut Bencher) {
             tx.send(i).unwrap();
         }
 
-        for (i, msg) in rx.try_iter().enumerate() {
-            assert_eq!(msg, i);
+        for msg in rx.try_iter() {
+            black_box(msg);
         }
         assert!(rx.try_recv().is_err());
     });
@@ -46,8 +46,8 @@ fn std(b: &mut Bencher) {
             tx.send(i).unwrap();
         }
 
-        for (i, msg) in rx.try_iter().enumerate() {
-            assert_eq!(msg, i);
+        for msg in rx.try_iter() {
+            black_box(msg);
         }
         assert!(rx.try_recv().is_err());
     });
