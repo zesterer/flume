@@ -121,13 +121,11 @@ fn test_inout<S: Sender>(b: &mut Bencher) {
     });
 }
 
-fn test_hydra<S: Sender>(b: &mut Bencher, msg_num: usize) {
-    const THREAD_NUM: usize = 32;
-
+fn test_hydra<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize) {
     b.iter(|| {
         let (tx, mut rx) = S::channel();
 
-        for _ in 0..THREAD_NUM {
+        for _ in 0..thread_num {
             let mut main_tx = tx.clone();
             let (mut tx, mut rx) = S::channel();
 
@@ -150,7 +148,7 @@ fn test_hydra<S: Sender>(b: &mut Bencher, msg_num: usize) {
             total += 1;
         }
 
-        assert_eq!(total, THREAD_NUM * msg_num);
+        assert_eq!(total, thread_num * msg_num);
     });
 }
 
@@ -174,17 +172,23 @@ fn inout(b: &mut Criterion) {
     b.bench_function("inout-std", |b| test_inout::<mpsc::Sender<u32>>(b));
 }
 
-fn hydra_1(b: &mut Criterion) {
-    b.bench_function("hydra-1-flume", |b| test_hydra::<flume::Sender<u32>>(b, 1));
-    b.bench_function("hydra-1-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 1));
-    b.bench_function("hydra-1-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 1));
+fn hydra_32t_1m(b: &mut Criterion) {
+    b.bench_function("hydra-32t-1m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 32, 1));
+    b.bench_function("hydra-32t-1m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 32, 1));
+    b.bench_function("hydra-32t-1m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 32, 1));
 }
 
-fn hydra_1000(b: &mut Criterion) {
-    b.bench_function("hydra-1000-flume", |b| test_hydra::<flume::Sender<u32>>(b, 1000));
-    b.bench_function("hydra-1000-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 1000));
-    b.bench_function("hydra-1000-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 1000));
+fn hydra_32t_1000m(b: &mut Criterion) {
+    b.bench_function("hydra-32t-1000m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 32, 1000));
+    b.bench_function("hydra-32t-1000m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 32, 1000));
+    b.bench_function("hydra-32t-1000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 32, 1000));
 }
 
-criterion_group!(compare, create, oneshot, inout, hydra_1, hydra_1000);
+fn hydra_1t_1000m(b: &mut Criterion) {
+    b.bench_function("hydra-1t-1000m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 1, 1000));
+    b.bench_function("hydra-1t-1000m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 1, 1000));
+    b.bench_function("hydra-1t-1000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 1, 1000));
+}
+
+criterion_group!(compare, create, oneshot, inout, hydra_32t_1m, hydra_32t_1000m, hydra_1t_1000m);
 criterion_main!(compare);

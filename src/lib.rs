@@ -27,12 +27,16 @@ struct Shared<T: Msg> {
     disconnected: Mutex<bool>,
     trigger: Condvar,
     senders: AtomicUsize,
+    listeners: AtomicUsize,
 }
 
 impl<T: Msg> Shared<T> {
     fn send(&self, msg: T) {
         self.queue.lock().inner.push_back(msg);
-        self.trigger.notify_one();
+
+        if self.listeners.load(Ordering::Relaxed) > 0 {
+            self.trigger.notify_all();
+        }
     }
 
     fn disconnect(&self) {
@@ -41,11 +45,15 @@ impl<T: Msg> Shared<T> {
     }
 
     fn wait(&self) {
-        let mut disconnected = self.disconnected.lock().unwrap();
+        self.listeners.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut disconnected = self.disconnected.lock().unwrap();
 
-        if !*disconnected {
-            let _ = self.trigger.wait(disconnected).unwrap();
+            if !*disconnected {
+                let _ = self.trigger.wait(disconnected).unwrap();
+            }
         }
+        self.listeners.fetch_sub(1, Ordering::Relaxed);
     }
 
     fn try_recv(&self) -> Result<T, RecvError> {
@@ -194,6 +202,7 @@ pub fn channel<T: Msg>() -> (Sender<T>, Receiver<T>) {
         disconnected: Mutex::new(false),
         trigger: Condvar::new(),
         senders: AtomicUsize::new(1),
+        listeners: AtomicUsize::new(0),
     });
     (
         Sender { shared: shared.clone() },
