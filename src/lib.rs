@@ -74,7 +74,7 @@ impl<T: Msg> Shared<T> {
         let disconnected = *self.disconnected.lock().unwrap();
 
         let msgs = {
-            let mut msgs = VecDeque::with_capacity(256);
+            let mut msgs = VecDeque::new();
             std::mem::swap(&mut msgs, &mut self.queue.lock().inner);
             msgs
         };
@@ -172,9 +172,6 @@ pub struct Iter<'a, T: Msg> {
     spin_time: u64,
 }
 
-static mut ELAPSED: usize = 0;
-static mut SAVED: usize = 0;
-
 impl<'a, T: Msg> Iterator for Iter<'a, T> {
     type Item = T;
 
@@ -226,7 +223,7 @@ impl<'a, T: Msg> Iterator for TryIter<'a, T> {
 pub fn channel<T: Msg>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         queue: spin::Mutex::new(Queue {
-            inner: VecDeque::with_capacity(256),
+            inner: VecDeque::new(),
         }),
         disconnected: Mutex::new(false),
         trigger: Condvar::new(),
