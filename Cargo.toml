@@ -3,12 +3,10 @@ name = "flume"
 version = "0.1.0"
 authors = ["Joshua Barretto <joshua.s.barretto@gmail.com>"]
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "A blazingly fast multi-producer channel"
 
 [dependencies]
 spin = "0.5"
-parking_lot = "0.9"
 deque = "0.3"
 
 [dev-dependencies]
