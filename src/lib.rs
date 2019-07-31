@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, atomic::{AtomicUsize, Ordering}},
+    time::Duration,
 };
 use std::sync::{Condvar, Mutex};
 
@@ -73,7 +74,7 @@ impl<T: Msg> Shared<T> {
         let disconnected = *self.disconnected.lock().unwrap();
 
         let msgs = {
-            let mut msgs = VecDeque::new();
+            let mut msgs = VecDeque::with_capacity(256);
             std::mem::swap(&mut msgs, &mut self.queue.lock().inner);
             msgs
         };
@@ -131,6 +132,9 @@ pub struct Receiver<T: Msg> {
     shared: Arc<Shared<T>>,
 }
 
+const SPIN_DEFAULT: u64 = 1;
+const SPIN_MAX: u64 = 4;
+
 impl<T: Msg> Receiver<T> {
     pub fn recv(&self) -> Result<T, RecvError> {
         self.shared.recv()
@@ -144,6 +148,7 @@ impl<T: Msg> Receiver<T> {
         Iter {
             shared: &self.shared,
             ready: VecDeque::new(),
+            spin_time: SPIN_DEFAULT,
         }
     }
 
@@ -164,7 +169,11 @@ impl<T: Msg> Drop for Receiver<T> {
 pub struct Iter<'a, T: Msg> {
     shared: &'a Shared<T>,
     ready: VecDeque<T>,
+    spin_time: u64,
 }
+
+static mut ELAPSED: usize = 0;
+static mut SAVED: usize = 0;
 
 impl<'a, T: Msg> Iterator for Iter<'a, T> {
     type Item = T;
@@ -174,14 +183,23 @@ impl<'a, T: Msg> Iterator for Iter<'a, T> {
             self.ready = match self.shared.try_recv_all() {
                 Ok(msgs) => msgs,
                 Err(RecvError::Empty) => {
-                    self.shared.wait();
+                    if self.spin_time > SPIN_MAX {
+                        self.shared.wait();
+                    } else {
+                        spin_sleep::sleep(Duration::from_nanos(1 << self.spin_time));
+                        self.spin_time += 1;
+                    }
                     continue
                 },
                 Err(RecvError::Disconnected) => break,
             };
         }
 
-        self.ready.pop_front()
+        self.spin_time = SPIN_DEFAULT;
+
+        let msg = self.ready.pop_front()?;
+
+        Some(msg)
     }
 }
 
@@ -208,7 +226,7 @@ impl<'a, T: Msg> Iterator for TryIter<'a, T> {
 pub fn channel<T: Msg>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         queue: spin::Mutex::new(Queue {
-            inner: VecDeque::new(),
+            inner: VecDeque::with_capacity(256),
         }),
         disconnected: Mutex::new(false),
         trigger: Condvar::new(),

@@ -190,5 +190,11 @@ fn hydra_1t_1000m(b: &mut Criterion) {
     b.bench_function("hydra-1t-1000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 1, 1000));
 }
 
-criterion_group!(compare, create, oneshot, inout, hydra_32t_1m, hydra_32t_1000m, hydra_1t_1000m);
+fn hydra_4t_10000m(b: &mut Criterion) {
+    b.bench_function("hydra-4t-10000m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 4, 10000));
+    b.bench_function("hydra-4t-10000m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 4, 10000));
+    b.bench_function("hydra-4t-10000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 4, 10000));
+}
+
+criterion_group!(compare, create, oneshot, inout, hydra_32t_1m, hydra_32t_1000m, hydra_1t_1000m, hydra_4t_10000m);
 criterion_main!(compare);
