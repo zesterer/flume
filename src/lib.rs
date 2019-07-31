@@ -8,6 +8,11 @@ pub trait Msg: Send + 'static {}
 impl<T: Send + 'static> Msg for T {}
 
 #[derive(Copy, Clone, Debug)]
+pub enum SendError {
+    Disconnected,
+}
+
+#[derive(Copy, Clone, Debug)]
 pub enum RecvError {
     Empty,
     Disconnected,
@@ -22,16 +27,21 @@ struct Shared<T: Msg> {
     disconnected: Mutex<bool>,
     trigger: Condvar,
     senders: AtomicUsize,
-    listeners: AtomicUsize,
+    listen_mode: AtomicUsize,
 }
 
 impl<T: Msg> Shared<T> {
-    fn send(&self, msg: T) {
+    fn send(&self, msg: T) -> Result<(), SendError> {
         self.queue.lock().inner.push_back(msg);
 
-        if self.listeners.load(Ordering::Relaxed) > 0 {
-            self.trigger.notify_all();
+        match self.listen_mode.load(Ordering::Relaxed) {
+            2 => self.trigger.notify_all(),
+            1 => {},
+            0 => return Err(SendError::Disconnected),
+            _ => unreachable!(),
         }
+
+        Ok(())
     }
 
     fn disconnect(&self) {
@@ -40,7 +50,7 @@ impl<T: Msg> Shared<T> {
     }
 
     fn wait(&self) {
-        self.listeners.fetch_add(1, Ordering::Relaxed);
+        self.listen_mode.fetch_add(1, Ordering::Relaxed);
         {
             let disconnected = self.disconnected.lock().unwrap();
 
@@ -48,7 +58,7 @@ impl<T: Msg> Shared<T> {
                 let _ = self.trigger.wait(disconnected).unwrap();
             }
         }
-        self.listeners.fetch_sub(1, Ordering::Relaxed);
+        self.listen_mode.fetch_sub(1, Ordering::Relaxed);
     }
 
     fn try_recv(&self) -> Result<T, RecvError> {
@@ -97,8 +107,8 @@ pub struct Sender<T: Msg> {
 }
 
 impl<T: Msg> Sender<T> {
-    pub fn send(&self, msg: T) {
-        self.shared.send(msg);
+    pub fn send(&self, msg: T) -> Result<(), SendError> {
+        self.shared.send(msg)
     }
 }
 
@@ -142,6 +152,12 @@ impl<T: Msg> Receiver<T> {
             shared: &self.shared,
             ready: VecDeque::new(),
         }
+    }
+}
+
+impl<T: Msg> Drop for Receiver<T> {
+    fn drop(&mut self) {
+        self.shared.listen_mode.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -197,7 +213,7 @@ pub fn channel<T: Msg>() -> (Sender<T>, Receiver<T>) {
         disconnected: Mutex::new(false),
         trigger: Condvar::new(),
         senders: AtomicUsize::new(1),
-        listeners: AtomicUsize::new(0),
+        listen_mode: AtomicUsize::new(1),
     });
     (
         Sender { shared: shared.clone() },

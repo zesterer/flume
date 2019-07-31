@@ -18,12 +18,12 @@ fn main() {
             let (tx, rx) = flume::channel();
 
             for _ in 0..MSG_NUM {
-                tx.send(Default::default());
+                tx.send(Default::default()).unwrap();
             }
 
             thread::spawn(move || {
                 for msg in rx.iter() {
-                    main_tx.send(msg);
+                    main_tx.send(msg).unwrap();
                 }
             });
         }

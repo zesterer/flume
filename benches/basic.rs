@@ -30,7 +30,7 @@ impl<T: Send + Default + 'static> Sender for flume::Sender<T> {
     }
 
     fn send(&mut self, msg: T) {
-        flume::Sender::send(self, msg);
+        flume::Sender::send(self, msg).unwrap();
     }
 }
 
