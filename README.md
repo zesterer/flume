@@ -23,3 +23,11 @@ assert_eq!((0..10).sum(), received);
 Flume is considerably faster than `std`'s `mpsc`, and on par with `crossbeam_channel` for most metrics.
 
 *TODO: More in-depth numbers*
+
+## License
+
+Flume is licensed under either of:
+
+- Apache License 2.0, (http://www.apache.org/licenses/LICENSE-2.0)
+
+- MIT license (http://opensource.org/licenses/MIT)

@@ -4,6 +4,10 @@ version = "0.1.0"
 authors = ["Joshua Barretto <joshua.s.barretto@gmail.com>"]
 edition = "2018"
 description = "A blazingly fast multi-producer channel"
+repository = "https://github.com/zesterer/flume"
+keywords = ["mpsc", "fifo", "channel", "thread", "fast"]
+categories = ["concurrency", "data-structures"]
+license = "Apache-2.0/MIT"
 
 [dependencies]
 spin = "0.5"
