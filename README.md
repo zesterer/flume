@@ -18,6 +18,14 @@ let received = rx
 assert_eq!((0..10).sum(), received);
 ```
 
+## Usage
+
+To use Flume, place the following line under the `[dependencies]` section in your `Cargo.toml`:
+
+```
+flume = "*"
+```
+
 ## Performance
 
 Flume is considerably faster than `std`'s `mpsc`, and on par with `crossbeam_channel` for most benchmarks.
