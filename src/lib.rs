@@ -1,16 +1,16 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, atomic::{AtomicUsize, Ordering}},
-    time::Duration,
+    time::{Duration, Instant},
 };
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 pub trait Msg: Send + 'static {}
 impl<T: Send + 'static> Msg for T {}
 
 #[derive(Copy, Clone, Debug)]
-pub enum SendError {
-    Disconnected,
+pub enum SendError<T: Msg> {
+    Disconnected(T),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -32,36 +32,42 @@ struct Shared<T: Msg> {
 }
 
 impl<T: Msg> Shared<T> {
-    fn send(&self, msg: T) -> Result<(), SendError> {
-        self.queue.lock().inner.push_back(msg);
+    #[inline(always)]
+    fn send(&self, msg: T) -> Result<(), SendError<T>> {
+        let mut queue = self.queue.lock();
 
         match self.listen_mode.load(Ordering::Relaxed) {
             2 => self.trigger.notify_all(),
             1 => {},
-            0 => return Err(SendError::Disconnected),
+            0 => return Err(SendError::Disconnected(msg)),
             _ => unreachable!(),
         }
+
+        queue.inner.push_back(msg);
 
         Ok(())
     }
 
-    fn disconnect(&self) {
+    #[inline(always)]
+    fn all_senders_disconnected(&self) {
         *self.disconnected.lock().unwrap() = true;
         self.trigger.notify_all();
     }
 
-    fn wait(&self) {
+    #[inline(always)]
+    fn wait(&self, f: impl FnOnce(&Condvar, MutexGuard<bool>)) {
         self.listen_mode.fetch_add(1, Ordering::Relaxed);
         {
             let disconnected = self.disconnected.lock().unwrap();
 
             if !*disconnected {
-                let _ = self.trigger.wait(disconnected).unwrap();
+                f(&self.trigger, disconnected);
             }
         }
         self.listen_mode.fetch_sub(1, Ordering::Relaxed);
     }
 
+    #[inline(always)]
     fn try_recv(&self) -> Result<T, RecvError> {
         match self.queue.lock().inner.pop_front() {
             Some(msg) => Ok(msg),
@@ -70,6 +76,7 @@ impl<T: Msg> Shared<T> {
         }
     }
 
+    #[inline(always)]
     fn try_recv_all(&self) -> Result<VecDeque<T>, RecvError> {
         let disconnected = *self.disconnected.lock().unwrap();
 
@@ -90,15 +97,21 @@ impl<T: Msg> Shared<T> {
         }
     }
 
-    fn recv(&self) -> Result<T, RecvError> {
+    #[inline(always)]
+    fn recv(&self, timeout: Option<Duration>) -> Result<T, RecvError> {
         loop {
             match self.try_recv() {
                 Ok(msg) => return Ok(msg),
-                Err(RecvError::Empty) => {},
+                Err(RecvError::Empty) if timeout.is_none() => {},
                 Err(err) => return Err(err),
             }
 
-            self.wait();
+            self.wait(|trigger, guard| {
+                let _ = match timeout {
+                    Some(timeout) => trigger.wait_timeout(guard, timeout).unwrap().0,
+                    None => trigger.wait(guard).unwrap(),
+                };
+            });
         }
     }
 }
@@ -108,7 +121,7 @@ pub struct Sender<T: Msg> {
 }
 
 impl<T: Msg> Sender<T> {
-    pub fn send(&self, msg: T) -> Result<(), SendError> {
+    pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         self.shared.send(msg)
     }
 }
@@ -123,7 +136,7 @@ impl<T: Msg> Clone for Sender<T> {
 impl<T: Msg> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.shared.senders.fetch_sub(1, Ordering::Relaxed) == 1 {
-            self.shared.disconnect();
+            self.shared.all_senders_disconnected();
         }
     }
 }
@@ -137,7 +150,15 @@ const SPIN_MAX: u64 = 4;
 
 impl<T: Msg> Receiver<T> {
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.shared.recv()
+        self.shared.recv(None)
+    }
+
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvError> {
+        self.shared.recv(Some(timeout))
+    }
+
+    pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvError> {
+        self.shared.recv(Some(deadline.duration_since(Instant::now())))
     }
 
     pub fn try_recv(&self) -> Result<T, RecvError> {
@@ -181,7 +202,9 @@ impl<'a, T: Msg> Iterator for Iter<'a, T> {
                 Ok(msgs) => msgs,
                 Err(RecvError::Empty) => {
                     if self.spin_time > SPIN_MAX {
-                        self.shared.wait();
+                        self.shared.wait(|trigger, guard| {
+                            let _ = trigger.wait(guard).unwrap();
+                        });
                     } else {
                         spin_sleep::sleep(Duration::from_nanos(1 << self.spin_time));
                         self.spin_time += 1;

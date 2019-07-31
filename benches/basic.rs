@@ -4,11 +4,12 @@ extern crate criterion;
 use std::{
     sync::mpsc,
     thread,
+    fmt::Debug,
 };
 use criterion::{Criterion, Bencher, black_box};
 
 trait Sender: Clone + Send + Sized + 'static {
-    type Item: Default;
+    type Item: Debug + Default;
     type Receiver: Receiver<Item=Self::Item>;
 
     fn channel() -> (Self, Self::Receiver);
@@ -21,7 +22,7 @@ trait Receiver: Send + Sized + 'static {
     fn iter(&mut self) -> Box<dyn Iterator<Item=Self::Item> + '_>;
 }
 
-impl<T: Send + Default + 'static> Sender for flume::Sender<T> {
+impl<T: Send + Debug + Default + 'static> Sender for flume::Sender<T> {
     type Item = T;
     type Receiver = flume::Receiver<T>;
 
@@ -46,7 +47,7 @@ impl<T: Send + Default + 'static> Receiver for flume::Receiver<T> {
     }
 }
 
-impl<T: Send + Default + 'static> Sender for crossbeam_channel::Sender<T> {
+impl<T: Send + Debug + Default + 'static> Sender for crossbeam_channel::Sender<T> {
     type Item = T;
     type Receiver = crossbeam_channel::Receiver<T>;
 
@@ -71,7 +72,7 @@ impl<T: Send + Default + 'static> Receiver for crossbeam_channel::Receiver<T> {
     }
 }
 
-impl<T: Send + Default + 'static> Sender for mpsc::Sender<T> {
+impl<T: Send + Debug + Default + 'static> Sender for mpsc::Sender<T> {
     type Item = T;
     type Receiver = mpsc::Receiver<T>;
 

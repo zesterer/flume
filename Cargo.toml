@@ -8,6 +8,7 @@ repository = "https://github.com/zesterer/flume"
 keywords = ["mpsc", "fifo", "channel", "thread", "fast"]
 categories = ["concurrency", "data-structures"]
 license = "Apache-2.0/MIT"
+readme = "README.md"
 
 [dependencies]
 spin = "0.5"
