@@ -5,11 +5,8 @@ use std::{
 };
 use std::sync::{Condvar, Mutex, MutexGuard};
 
-pub trait Msg: Send + 'static {}
-impl<T: Send + 'static> Msg for T {}
-
 #[derive(Copy, Clone, Debug)]
-pub enum SendError<T: Msg> {
+pub enum SendError<T: Send + 'static> {
     Disconnected(T),
 }
 
@@ -19,11 +16,11 @@ pub enum RecvError {
     Disconnected,
 }
 
-struct Queue<T: Msg> {
+struct Queue<T: Send + 'static> {
     inner: VecDeque<T>,
 }
 
-struct Shared<T: Msg> {
+struct Shared<T: Send + 'static> {
     queue: spin::Mutex<Queue<T>>,
     disconnected: Mutex<bool>,
     trigger: Condvar,
@@ -31,15 +28,15 @@ struct Shared<T: Msg> {
     listen_mode: AtomicUsize,
 }
 
-impl<T: Msg> Shared<T> {
+impl<T: Send + 'static> Shared<T> {
     #[inline(always)]
     fn send(&self, msg: T) -> Result<(), SendError<T>> {
         let mut queue = self.queue.lock();
 
         match self.listen_mode.load(Ordering::Relaxed) {
-            2 => self.trigger.notify_all(),
-            1 => {},
             0 => return Err(SendError::Disconnected(msg)),
+            1 => {},
+            2 => self.trigger.notify_all(),
             _ => unreachable!(),
         }
 
@@ -56,7 +53,7 @@ impl<T: Msg> Shared<T> {
 
     #[inline(always)]
     fn wait(&self, f: impl FnOnce(&Condvar, MutexGuard<bool>)) {
-        self.listen_mode.fetch_add(1, Ordering::Relaxed);
+        self.listen_mode.fetch_add(1, Ordering::Acquire);
         {
             let disconnected = self.disconnected.lock().unwrap();
 
@@ -64,7 +61,7 @@ impl<T: Msg> Shared<T> {
                 f(&self.trigger, disconnected);
             }
         }
-        self.listen_mode.fetch_sub(1, Ordering::Relaxed);
+        self.listen_mode.fetch_sub(1, Ordering::Release);
     }
 
     #[inline(always)]
@@ -80,12 +77,7 @@ impl<T: Msg> Shared<T> {
     fn try_recv_all(&self) -> Result<VecDeque<T>, RecvError> {
         let disconnected = *self.disconnected.lock().unwrap();
 
-        let msgs = {
-            let mut msgs = VecDeque::new();
-            std::mem::swap(&mut msgs, &mut self.queue.lock().inner);
-            msgs
-        };
-
+        let msgs = std::mem::take(&mut self.queue.lock().inner);
         if msgs.len() == 0 {
             if disconnected {
                 Err(RecvError::Disconnected)
@@ -116,24 +108,24 @@ impl<T: Msg> Shared<T> {
     }
 }
 
-pub struct Sender<T: Msg> {
+pub struct Sender<T: Send + 'static> {
     shared: Arc<Shared<T>>,
 }
 
-impl<T: Msg> Sender<T> {
+impl<T: Send + 'static> Sender<T> {
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         self.shared.send(msg)
     }
 }
 
-impl<T: Msg> Clone for Sender<T> {
+impl<T: Send + 'static> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.shared.senders.fetch_add(1, Ordering::Relaxed);
         Self { shared: self.shared.clone() }
     }
 }
 
-impl<T: Msg> Drop for Sender<T> {
+impl<T: Send + 'static> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.shared.senders.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.shared.all_senders_disconnected();
@@ -141,14 +133,14 @@ impl<T: Msg> Drop for Sender<T> {
     }
 }
 
-pub struct Receiver<T: Msg> {
+pub struct Receiver<T: Send + 'static> {
     shared: Arc<Shared<T>>,
 }
 
 const SPIN_DEFAULT: u64 = 1;
 const SPIN_MAX: u64 = 4;
 
-impl<T: Msg> Receiver<T> {
+impl<T: Send + 'static> Receiver<T> {
     pub fn recv(&self) -> Result<T, RecvError> {
         self.shared.recv(None)
     }
@@ -181,19 +173,19 @@ impl<T: Msg> Receiver<T> {
     }
 }
 
-impl<T: Msg> Drop for Receiver<T> {
+impl<T: Send + 'static> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.shared.listen_mode.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
-pub struct Iter<'a, T: Msg> {
+pub struct Iter<'a, T: Send + 'static> {
     shared: &'a Shared<T>,
     ready: VecDeque<T>,
     spin_time: u64,
 }
 
-impl<'a, T: Msg> Iterator for Iter<'a, T> {
+impl<'a, T: Send + 'static> Iterator for Iter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -223,12 +215,12 @@ impl<'a, T: Msg> Iterator for Iter<'a, T> {
     }
 }
 
-pub struct TryIter<'a, T: Msg> {
+pub struct TryIter<'a, T: Send + 'static> {
     shared: &'a Shared<T>,
     ready: VecDeque<T>,
 }
 
-impl<'a, T: Msg> Iterator for TryIter<'a, T> {
+impl<'a, T: Send + 'static> Iterator for TryIter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -243,7 +235,7 @@ impl<'a, T: Msg> Iterator for TryIter<'a, T> {
     }
 }
 
-pub fn channel<T: Msg>() -> (Sender<T>, Receiver<T>) {
+pub fn channel<T: Send + 'static>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         queue: spin::Mutex::new(Queue {
             inner: VecDeque::new(),
