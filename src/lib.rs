@@ -6,13 +6,23 @@ use std::{
 use std::sync::{Condvar, Mutex, MutexGuard};
 
 #[derive(Copy, Clone, Debug)]
-pub enum SendError<T: Send + 'static> {
-    Disconnected(T),
-}
+pub struct SendError<T: Send + 'static>(T);
 
 #[derive(Copy, Clone, Debug)]
 pub enum RecvError {
     Empty,
+    Disconnected,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum TryRecvError {
+    Empty,
+    Disconnected,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum RecvTimeoutError {
+    Timeout,
     Disconnected,
 }
 
@@ -24,19 +34,43 @@ struct Shared<T: Send + 'static> {
     listen_mode: AtomicUsize,
 }
 
+fn backoff<T, U>(
+    spin_max: u64,
+    mut f: impl FnMut() -> Option<T>,
+    ok: impl FnOnce(T) -> U,
+    mut wait: impl FnMut(),
+) -> U {
+    let mut spin_time = 1;
+    loop {
+        match f() {
+            Some(r) => break ok(r),
+            None => if spin_time > spin_max {
+                wait();
+            } else {
+                spin_sleep::sleep(Duration::from_nanos(1 << spin_time));
+                spin_time += 1;
+            },
+        }
+    }
+}
+
 impl<T: Send + 'static> Shared<T> {
     fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        let mut queue = self.queue.lock();
+        backoff(
+            !0,
+            || self.queue.try_lock(),
+            |mut queue| {
+                match self.listen_mode.load(Ordering::Relaxed) {
+                    0 => return Err(SendError(msg)),
+                    1 => {},
+                    _ => self.trigger.notify_all(),
+                }
 
-        match self.listen_mode.load(Ordering::Relaxed) {
-            0 => return Err(SendError::Disconnected(msg)),
-            1 => {},
-            _ => self.trigger.notify_all(),
-        }
-
-        queue.push_back(msg);
-
-        Ok(())
+                queue.push_back(msg);
+                Ok(())
+            },
+            || {},
+        )
     }
 
     fn all_senders_disconnected(&self) {
@@ -44,40 +78,62 @@ impl<T: Send + 'static> Shared<T> {
         self.trigger.notify_all();
     }
 
-    fn wait(&self, f: impl FnOnce(&Condvar, MutexGuard<bool>)) {
+    fn wait<R>(&self, f: impl FnOnce(&Condvar, MutexGuard<bool>) -> R) -> Option<R> {
         self.listen_mode.fetch_add(1, Ordering::Acquire);
-        {
+        let r = {
             let disconnected = self.disconnected.lock().unwrap();
 
             if !*disconnected {
-                f(&self.trigger, disconnected);
+                Some(f(&self.trigger, disconnected))
+            } else {
+                None
             }
-        }
+        };
         self.listen_mode.fetch_sub(1, Ordering::Release);
+        r
     }
 
-    fn try_recv(&self) -> Result<T, RecvError> {
-        match self.queue.lock().pop_front() {
+    fn try_recv(&self) -> Result<T, TryRecvError> {
+        match self.queue
+            .try_lock()
+            .ok_or(TryRecvError::Empty)?
+            .pop_front()
+        {
             Some(msg) => Ok(msg),
-            None if *self.disconnected.lock().unwrap() => Err(RecvError::Disconnected),
-            None => Err(RecvError::Empty),
+            None if *self.disconnected.lock().unwrap() => Err(TryRecvError::Disconnected),
+            None => Err(TryRecvError::Empty),
         }
     }
 
-    fn recv(&self, timeout: Option<Duration>) -> Result<T, RecvError> {
+    fn recv(&self) -> Result<T, RecvError> {
+        const SPIN_MAX: u64 = 5;
+        backoff(
+            SPIN_MAX,
+            || match self.try_recv() {
+                Ok(msg) => Some(Ok(msg)),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err(RecvError::Disconnected)),
+            },
+            |x| x,
+            || { self.wait(|trigger, guard|{ let _ = trigger.wait(guard).unwrap(); }); },
+        )
+    }
+
+    fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
         loop {
             match self.try_recv() {
                 Ok(msg) => return Ok(msg),
-                Err(RecvError::Empty) if timeout.is_none() => {},
-                Err(err) => return Err(err),
+                Err(TryRecvError::Empty) => {},
+                Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
             }
 
-            self.wait(|trigger, guard| {
-                let _ = match timeout {
-                    Some(timeout) => trigger.wait_timeout(guard, timeout).unwrap().0,
-                    None => trigger.wait(guard).unwrap(),
-                };
-            });
+            if self.wait(|trigger, guard| trigger.wait_timeout(guard, timeout).unwrap().1.timed_out())
+                .ok_or(RecvTimeoutError::Disconnected)?
+            {
+                return Err(RecvTimeoutError::Timeout);
+            }
+
+            // TODO: Don't reset timeout!
         }
     }
 }
@@ -111,37 +167,38 @@ pub struct Receiver<T: Send + 'static> {
     shared: Arc<Shared<T>>,
 }
 
-const SPIN_DEFAULT: u64 = 1;
-const SPIN_MAX: u64 = 4;
-
 impl<T: Send + 'static> Receiver<T> {
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.shared.recv(None)
+        self.shared.recv()
     }
 
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvError> {
-        self.shared.recv(Some(timeout))
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+        self.shared.recv_timeout(timeout)
     }
 
-    pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvError> {
-        self.shared.recv(Some(deadline.duration_since(Instant::now())))
+    pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
+        self.shared.recv_timeout(deadline.duration_since(Instant::now()))
     }
 
-    pub fn try_recv(&self) -> Result<T, RecvError> {
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.shared.try_recv()
     }
 
     pub fn iter(&self) -> impl Iterator<Item=T> + '_ {
-        Iter {
-            shared: &self.shared,
-            spin_time: SPIN_DEFAULT,
-        }
+        Iter { shared: &self.shared }
     }
 
     pub fn try_iter(&self) -> impl Iterator<Item=T> + '_ {
-        TryIter {
-            shared: &self.shared,
-        }
+        TryIter { shared: &self.shared }
+    }
+}
+
+impl<T: Send + 'static> IntoIterator for Receiver<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter { receiver: self }
     }
 }
 
@@ -153,31 +210,13 @@ impl<T: Send + 'static> Drop for Receiver<T> {
 
 pub struct Iter<'a, T: Send + 'static> {
     shared: &'a Shared<T>,
-    spin_time: u64,
 }
 
 impl<'a, T: Send + 'static> Iterator for Iter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let msg = loop {
-            match self.shared.try_recv() {
-                Ok(msg) => break Some(msg),
-                Err(RecvError::Empty) => if self.spin_time > SPIN_MAX {
-                    self.shared.wait(|trigger, guard| {
-                        let _ = trigger.wait(guard).unwrap();
-                    });
-                } else {
-                    spin_sleep::sleep(Duration::from_nanos(1 << self.spin_time));
-                    self.spin_time += 1;
-                },
-                Err(RecvError::Disconnected) => break None,
-            }
-        };
-
-        self.spin_time = SPIN_DEFAULT;
-
-        msg
+        self.shared.recv().ok()
     }
 }
 
@@ -191,8 +230,20 @@ impl<'a, T: Send + 'static> Iterator for TryIter<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         match self.shared.try_recv() {
             Ok(msg) => Some(msg),
-            Err(RecvError::Empty) | Err(RecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
         }
+    }
+}
+
+pub struct IntoIter<T: Send + 'static> {
+    receiver: Receiver<T>,
+}
+
+impl<T: Send + 'static> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.receiver.shared.recv().ok()
     }
 }
 

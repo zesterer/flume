@@ -107,8 +107,8 @@ fn test_create<S: Sender>(b: &mut Bencher) {
 }
 
 fn test_oneshot<S: Sender>(b: &mut Bencher) {
+    let (mut tx, mut rx) = S::channel();
     b.iter(|| {
-        let (mut tx, mut rx) = S::channel();
         tx.send(Default::default());
         black_box(rx.recv());
     });
