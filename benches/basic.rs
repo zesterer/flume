@@ -130,15 +130,15 @@ fn test_hydra<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize) {
             let mut main_tx = tx.clone();
             let (mut tx, mut rx) = S::channel();
 
-            for _ in 0..msg_num {
-                tx.send(Default::default());
-            }
-
             thread::spawn(move || {
                 for msg in rx.iter() {
                     main_tx.send(msg);
                 }
             });
+
+            for _ in 0..msg_num {
+                tx.send(Default::default());
+            }
         }
 
         drop(tx);

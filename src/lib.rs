@@ -31,8 +31,7 @@ impl<T: Send + 'static> Shared<T> {
         match self.listen_mode.load(Ordering::Relaxed) {
             0 => return Err(SendError::Disconnected(msg)),
             1 => {},
-            2 => self.trigger.notify_all(),
-            _ => unreachable!(),
+            _ => self.trigger.notify_all(),
         }
 
         queue.push_back(msg);
@@ -62,21 +61,6 @@ impl<T: Send + 'static> Shared<T> {
             Some(msg) => Ok(msg),
             None if *self.disconnected.lock().unwrap() => Err(RecvError::Disconnected),
             None => Err(RecvError::Empty),
-        }
-    }
-
-    fn try_recv_all(&self) -> Result<VecDeque<T>, RecvError> {
-        let disconnected = *self.disconnected.lock().unwrap();
-
-        let msgs = std::mem::take(&mut *self.queue.lock());
-        if msgs.len() == 0 {
-            if disconnected {
-                Err(RecvError::Disconnected)
-            } else {
-                Err(RecvError::Empty)
-            }
-        } else {
-            Ok(msgs)
         }
     }
 
@@ -157,7 +141,6 @@ impl<T: Send + 'static> Receiver<T> {
     pub fn try_iter(&self) -> impl Iterator<Item=T> + '_ {
         TryIter {
             shared: &self.shared,
-            ready: VecDeque::new(),
         }
     }
 }
@@ -180,16 +163,13 @@ impl<'a, T: Send + 'static> Iterator for Iter<'a, T> {
         let msg = loop {
             match self.shared.try_recv() {
                 Ok(msg) => break Some(msg),
-                Err(RecvError::Empty) => {
-                    if self.spin_time > SPIN_MAX {
-                        self.shared.wait(|trigger, guard| {
-                            let _ = trigger.wait(guard).unwrap();
-                        });
-                    } else {
-                        spin_sleep::sleep(Duration::from_nanos(1 << self.spin_time));
-                        self.spin_time += 1;
-                    }
-                    continue
+                Err(RecvError::Empty) => if self.spin_time > SPIN_MAX {
+                    self.shared.wait(|trigger, guard| {
+                        let _ = trigger.wait(guard).unwrap();
+                    });
+                } else {
+                    spin_sleep::sleep(Duration::from_nanos(1 << self.spin_time));
+                    self.spin_time += 1;
                 },
                 Err(RecvError::Disconnected) => break None,
             }
@@ -203,21 +183,16 @@ impl<'a, T: Send + 'static> Iterator for Iter<'a, T> {
 
 pub struct TryIter<'a, T: Send + 'static> {
     shared: &'a Shared<T>,
-    ready: VecDeque<T>,
 }
 
 impl<'a, T: Send + 'static> Iterator for TryIter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.ready.len() == 0 {
-            self.ready = match self.shared.try_recv_all() {
-                Ok(msgs) => msgs,
-                Err(RecvError::Empty) | Err(RecvError::Disconnected) => VecDeque::new(),
-            };
+        match self.shared.try_recv() {
+            Ok(msg) => Some(msg),
+            Err(RecvError::Empty) | Err(RecvError::Disconnected) => None,
         }
-
-        self.ready.pop_front()
     }
 }
 
