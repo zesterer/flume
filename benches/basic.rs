@@ -97,18 +97,13 @@ impl<T: Send + Default + 'static> Receiver for mpsc::Receiver<T> {
     }
 }
 
-
-
-
-
-
 fn test_create<S: Sender>(b: &mut Bencher) {
     b.iter(|| S::channel());
 }
 
 fn test_oneshot<S: Sender>(b: &mut Bencher) {
-    let (mut tx, mut rx) = S::channel();
     b.iter(|| {
+        let (mut tx, mut rx) = S::channel();
         tx.send(Default::default());
         black_box(rx.recv());
     });
@@ -152,8 +147,6 @@ fn test_hydra<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize) {
         assert_eq!(total, thread_num * msg_num);
     });
 }
-
-
 
 fn create(b: &mut Criterion) {
     b.bench_function("create-flume", |b| test_create::<flume::Sender<u32>>(b));
