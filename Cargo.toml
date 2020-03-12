@@ -12,7 +12,7 @@ readme = "README.md"
 
 [dependencies]
 spin = "0.5"
-spin_sleep = "0.3"
+parking_lot = "0.10"
 
 [dev-dependencies]
 crossbeam-channel = "0.3"

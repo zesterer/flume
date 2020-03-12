@@ -13,13 +13,13 @@ trait Sender: Clone + Send + Sized + 'static {
     type Receiver: Receiver<Item=Self::Item>;
 
     fn channel() -> (Self, Self::Receiver);
-    fn send(&mut self, msg: Self::Item);
+    fn send(&self, msg: Self::Item);
 }
 
 trait Receiver: Send + Sized + 'static {
     type Item: Default;
-    fn recv(&mut self) -> Self::Item;
-    fn iter(&mut self) -> Box<dyn Iterator<Item=Self::Item> + '_>;
+    fn recv(&self) -> Self::Item;
+    fn iter(&self) -> Box<dyn Iterator<Item=Self::Item> + '_>;
 }
 
 impl<T: Send + Debug + Default + 'static> Sender for flume::Sender<T> {
@@ -30,7 +30,7 @@ impl<T: Send + Debug + Default + 'static> Sender for flume::Sender<T> {
         flume::channel()
     }
 
-    fn send(&mut self, msg: T) {
+    fn send(&self, msg: T) {
         flume::Sender::send(self, msg).unwrap();
     }
 }
@@ -38,11 +38,11 @@ impl<T: Send + Debug + Default + 'static> Sender for flume::Sender<T> {
 impl<T: Send + Default + 'static> Receiver for flume::Receiver<T> {
     type Item = T;
 
-    fn recv(&mut self) -> Self::Item {
+    fn recv(&self) -> Self::Item {
         flume::Receiver::recv(self).unwrap()
     }
 
-    fn iter(&mut self) -> Box<dyn Iterator<Item=T> + '_> {
+    fn iter(&self) -> Box<dyn Iterator<Item=T> + '_> {
         Box::new(flume::Receiver::iter(self))
     }
 }
@@ -55,7 +55,7 @@ impl<T: Send + Debug + Default + 'static> Sender for crossbeam_channel::Sender<T
         crossbeam_channel::unbounded()
     }
 
-    fn send(&mut self, msg: T) {
+    fn send(&self, msg: T) {
         crossbeam_channel::Sender::send(self, msg).unwrap();
     }
 }
@@ -63,11 +63,11 @@ impl<T: Send + Debug + Default + 'static> Sender for crossbeam_channel::Sender<T
 impl<T: Send + Default + 'static> Receiver for crossbeam_channel::Receiver<T> {
     type Item = T;
 
-    fn recv(&mut self) -> Self::Item {
+    fn recv(&self) -> Self::Item {
         crossbeam_channel::Receiver::recv(self).unwrap()
     }
 
-    fn iter(&mut self) -> Box<dyn Iterator<Item=T> + '_> {
+    fn iter(&self) -> Box<dyn Iterator<Item=T> + '_> {
         Box::new(crossbeam_channel::Receiver::iter(self))
     }
 }
@@ -80,7 +80,7 @@ impl<T: Send + Debug + Default + 'static> Sender for mpsc::Sender<T> {
         mpsc::channel()
     }
 
-    fn send(&mut self, msg: T) {
+    fn send(&self, msg: T) {
         mpsc::Sender::send(self, msg).unwrap();
     }
 }
@@ -88,11 +88,11 @@ impl<T: Send + Debug + Default + 'static> Sender for mpsc::Sender<T> {
 impl<T: Send + Default + 'static> Receiver for mpsc::Receiver<T> {
     type Item = T;
 
-    fn recv(&mut self) -> Self::Item {
+    fn recv(&self) -> Self::Item {
         mpsc::Receiver::recv(self).unwrap()
     }
 
-    fn iter(&mut self) -> Box<dyn Iterator<Item=T> + '_> {
+    fn iter(&self) -> Box<dyn Iterator<Item=T> + '_> {
         Box::new(mpsc::Receiver::iter(self))
     }
 }
@@ -103,14 +103,14 @@ fn test_create<S: Sender>(b: &mut Bencher) {
 
 fn test_oneshot<S: Sender>(b: &mut Bencher) {
     b.iter(|| {
-        let (mut tx, mut rx) = S::channel();
+        let (tx, rx) = S::channel();
         tx.send(Default::default());
         black_box(rx.recv());
     });
 }
 
 fn test_inout<S: Sender>(b: &mut Bencher) {
-    let (mut tx, mut rx) = S::channel();
+    let (tx, rx) = S::channel();
     b.iter(|| {
         tx.send(Default::default());
         black_box(rx.recv());
@@ -118,33 +118,35 @@ fn test_inout<S: Sender>(b: &mut Bencher) {
 }
 
 fn test_hydra<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize) {
+    let (main_tx, main_rx) = S::channel();
+
+    let mut txs = Vec::new();
+    for _ in 0..thread_num {
+        let main_tx = main_tx.clone();
+        let (tx, rx) = S::channel();
+        txs.push(tx);
+
+        thread::spawn(move || {
+            for msg in rx.iter() {
+                main_tx.send(msg);
+            }
+        });
+    }
+
+    drop(main_tx);
+
     b.iter(|| {
-        let (tx, mut rx) = S::channel();
-
-        for _ in 0..thread_num {
-            let mut main_tx = tx.clone();
-            let (mut tx, mut rx) = S::channel();
-
-            thread::spawn(move || {
-                for msg in rx.iter() {
-                    main_tx.send(msg);
-                }
-            });
-
+        for tx in &txs {
             for _ in 0..msg_num {
                 tx.send(Default::default());
             }
         }
 
-        drop(tx);
-
-        let mut total = 0;
-        for msg in rx.iter() {
-            black_box(msg);
-            total += 1;
+        for _ in 0..thread_num {
+            for _ in 0..msg_num {
+                black_box(main_rx.recv());
+            }
         }
-
-        assert_eq!(total, thread_num * msg_num);
     });
 }
 

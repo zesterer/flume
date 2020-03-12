@@ -13,53 +13,34 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}},
+    sync::{Arc, atomic::{AtomicUsize, Ordering, spin_loop_hint}},
     time::{Duration, Instant},
+    thread,
 };
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex};
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SendError<T: Send + 'static>(T);
 
 /// An error that may be emitted when attempting to wait for a value on a receiver.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RecvError {
     Disconnected,
 }
 
 /// An error that may be emitted when attempting to fetch a value on a receiver.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TryRecvError {
     Empty,
     Disconnected,
 }
 
 /// An error that may be emitted when attempting to wait for a value on a receiver with a timeout.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RecvTimeoutError {
     Timeout,
     Disconnected,
-}
-
-fn backoff<T, U>(
-    spin_max: u64,
-    mut test: impl FnMut() -> Option<T>,
-    success: impl FnOnce(T) -> U,
-    mut wait: impl FnMut(),
-) -> U {
-    let mut spin_time = 1;
-    loop {
-        match test() {
-            Some(r) => break success(r),
-            None => if spin_time > spin_max {
-                wait();
-            } else {
-                spin_sleep::sleep(Duration::from_nanos(1 << spin_time));
-                spin_time += 1;
-            },
-        }
-    }
 }
 
 struct Queue<T> {
@@ -82,90 +63,88 @@ impl<T> Queue<T> {
 
 struct Shared<T: Send + 'static> {
     queue: spin::Mutex<Queue<T>>,
-    recv_lock: Mutex<()>,
+    recv_lock: Mutex<bool>,
     send_trigger: Condvar,
-    is_disconnected: AtomicBool,
     senders: AtomicUsize,
-    listen_mode: AtomicUsize,
+    listeners: AtomicUsize,
 }
 
 impl<T: Send + 'static> Shared<T> {
     fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        backoff(
-            8,
-            || self.queue.try_lock(),
-            |mut queue| {
-                match self.listen_mode.load(Ordering::Relaxed) {
-                    0 => return Err(SendError(msg)),
-                    1 => {},
-                    _ => self.send_trigger.notify_all(),
+        loop {
+            if let Some(mut queue) = self.queue.try_lock() {
+                let listen_mode = self.listeners.load(Ordering::Relaxed);
+                if listen_mode == 0 {
+                    break Err(SendError(msg));
+                } else {
+                    queue.push(msg);
+                    drop(queue);
+                    if listen_mode > 1 {
+                        let _ = self.recv_lock.lock().unwrap();
+                        self.send_trigger.notify_one();
+                    }
+                    break Ok(());
                 }
-
-                queue.push(msg);
-                Ok(())
-            },
-            // If everything goes to hell and the stars align against us, make sure we don't wait
-            // for too long before trying again.
-            || spin_sleep::sleep(Duration::from_nanos(500)),
-        )
-    }
-
-    fn is_disconnected(&self) -> bool {
-        self.is_disconnected.load(Ordering::Relaxed)
+            } else {
+                thread::yield_now();
+            }
+        }
     }
 
     fn all_senders_disconnected(&self) {
-        self.is_disconnected.store(true, Ordering::Relaxed);
-        let _ = self.recv_lock.lock().unwrap();
+        let mut disconnected = self.recv_lock.lock().unwrap();
+        *disconnected = true;
         self.send_trigger.notify_all();
     }
 
-    fn wait<R>(&self, f: impl FnOnce(&Condvar, MutexGuard<()>) -> R) -> Option<R> {
-        self.listen_mode.fetch_add(1, Ordering::Acquire);
-        let r = {
-            let recv_lock = self.recv_lock.lock().unwrap();
-
-            if self.is_disconnected() {
-                None
-            } else {
-                Some(f(&self.send_trigger, recv_lock))
-            }
-        };
-        self.listen_mode.fetch_sub(1, Ordering::Release);
-        r
-    }
-
     fn try_recv(&self) -> Result<T, TryRecvError> {
-        const SPIN_MAX: u64 = 5;
-        backoff(
-            SPIN_MAX,
-            || match self.queue.try_lock() {
-                Some(mut queue) => Some(queue
-                    .pop()
-                    .ok_or(TryRecvError::Empty)),
-                None if self.is_disconnected() => Some(Err(TryRecvError::Disconnected)),
-                None => None,
-            },
-            |x| x,
-            || { self.wait(|trigger, guard|{ let _ = trigger.wait(guard).unwrap(); }); },
-        )
+        loop {
+            if let Some(mut queue) = self.queue.try_lock() {
+                break queue.pop().ok_or(TryRecvError::Empty);
+            } if self.senders.load(Ordering::Relaxed) == 0 {
+                break Err(TryRecvError::Disconnected);
+            } else {
+                thread::yield_now();
+            }
+        }
     }
 
     fn recv(&self) -> Result<T, RecvError> {
-        const SPIN_MAX: u64 = 5;
-        backoff(
-            SPIN_MAX,
-            || match self.queue
-                .try_lock()?
-                .pop()
-            {
-                Some(msg) => Some(Ok(msg)),
-                None if self.is_disconnected() => Some(Err(RecvError::Disconnected)),
-                None => None,
-            },
-            |x| x,
-            || { self.wait(|trigger, guard|{ let _ = trigger.wait(guard).unwrap(); }); },
-        )
+        let mut guard = None;
+        let mut disconnected = false;
+
+        let result = loop {
+            guard = if let Some(mut queue) = self.queue.try_lock() {
+                match queue.pop() {
+                    Some(msg) => break Ok(msg),
+                    None if disconnected => break Err(RecvError::Disconnected),
+                    // Sleep when empty
+                    None => {
+                        self.listeners.store(2, Ordering::Relaxed);
+                        Some(guard
+                            .unwrap_or_else(|| self.recv_lock.lock().unwrap()))
+                    },
+                }
+            } else {
+                guard
+            };
+
+            disconnected |= guard
+                .as_ref()
+                .map(|guard| **guard)
+                .unwrap_or(false);
+
+            if let (Some(g), false) = (guard.take(), disconnected) {
+                guard = Some(self.send_trigger.wait(g).unwrap());
+            } else {
+                thread::yield_now(); // Attempt a yield before sleeping
+            }
+            if guard.is_none() {
+                self.listeners.store(1, Ordering::Relaxed);
+            }
+        };
+        self.listeners.store(1, Ordering::Relaxed);
+        result
     }
 
     fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
@@ -173,26 +152,30 @@ impl<T: Send + 'static> Shared<T> {
             return Ok(msg);
         }
 
-        loop {
+        let mut guard = self.recv_lock.lock().unwrap();
+        self.listeners.store(2, Ordering::Relaxed);
+        let result = loop {
             let now = Instant::now();
             let timeout = if now >= deadline {
-                return Err(RecvTimeoutError::Timeout);
+                break Err(RecvTimeoutError::Timeout);
             } else {
                 deadline.duration_since(now)
             };
 
-            if self.wait(|trigger, guard| trigger.wait_timeout(guard, timeout).unwrap().1.timed_out())
-                .ok_or(RecvTimeoutError::Disconnected)?
-            {
-                return Err(RecvTimeoutError::Timeout);
+            let (nguard, timeout) = self.send_trigger.wait_timeout(guard, timeout).unwrap();
+            guard = nguard;
+            if timeout.timed_out() {
+                break Err(RecvTimeoutError::Timeout);
             }
 
             match self.try_recv() {
-                Ok(msg) => return Ok(msg),
+                Ok(msg) => break Ok(msg),
                 Err(TryRecvError::Empty) => {},
-                Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
+                Err(TryRecvError::Disconnected) => break Err(RecvTimeoutError::Disconnected),
             }
-        }
+        };
+        self.listeners.store(1, Ordering::Relaxed);
+        result
     }
 }
 
@@ -278,7 +261,7 @@ impl<T: Send + 'static> IntoIterator for Receiver<T> {
 
 impl<T: Send + 'static> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.shared.listen_mode.fetch_sub(1, Ordering::Relaxed);
+        self.shared.listeners.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -341,11 +324,10 @@ impl<T: Send + 'static> Iterator for IntoIter<T> {
 pub fn channel<T: Send + 'static>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         queue: spin::Mutex::new(Queue::new()),
-        recv_lock: Mutex::new(()),
+        recv_lock: Mutex::new(false),
         send_trigger: Condvar::new(),
-        is_disconnected: AtomicBool::new(false),
         senders: AtomicUsize::new(1),
-        listen_mode: AtomicUsize::new(1),
+        listeners: AtomicUsize::new(1),
     });
     (
         Sender { shared: shared.clone() },
