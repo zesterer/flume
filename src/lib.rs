@@ -196,6 +196,7 @@ impl<T: Send + 'static> Shared<T> {
     }
 }
 
+/// A transmitting end of a channel.
 pub struct Sender<T: Send + 'static> {
     shared: Arc<Shared<T>>,
 }
@@ -223,6 +224,7 @@ impl<T: Send + 'static> Drop for Sender<T> {
     }
 }
 
+/// The receiving end of a channel.
 pub struct Receiver<T: Send + 'static> {
     shared: Arc<Shared<T>>,
 }
@@ -280,6 +282,7 @@ impl<T: Send + 'static> Drop for Receiver<T> {
     }
 }
 
+/// An iterator over the items received from a channel.
 pub struct Iter<'a, T: Send + 'static> {
     shared: &'a Shared<T>,
 }
@@ -292,6 +295,7 @@ impl<'a, T: Send + 'static> Iterator for Iter<'a, T> {
     }
 }
 
+/// An non-blocking iterator over the items received from a channel.
 pub struct TryIter<'a, T: Send + 'static> {
     shared: &'a Shared<T>,
 }
@@ -307,6 +311,7 @@ impl<'a, T: Send + 'static> Iterator for TryIter<'a, T> {
     }
 }
 
+/// An owned iterator over the items received from a channel.
 pub struct IntoIter<T: Send + 'static> {
     receiver: Receiver<T>,
 }
