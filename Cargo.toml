@@ -1,6 +1,6 @@
 [package]
 name = "flume"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["Joshua Barretto <joshua.s.barretto@gmail.com>"]
 edition = "2018"
 description = "A blazingly fast multi-producer channel"
@@ -12,7 +12,6 @@ readme = "README.md"
 
 [dependencies]
 spin = "0.5"
-parking_lot = "0.10"
 
 [dev-dependencies]
 crossbeam-channel = "0.3"
