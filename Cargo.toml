@@ -1,6 +1,6 @@
 [package]
 name = "flume"
-version = "0.3.2"
+version = "0.4.0"
 authors = ["Joshua Barretto <joshua.s.barretto@gmail.com>"]
 edition = "2018"
 description = "A blazingly fast multi-producer channel"
@@ -16,9 +16,6 @@ spin = "0.5"
 [dev-dependencies]
 crossbeam-channel = "0.3"
 criterion = "0.2"
-
-[profile.release]
-debug = true
 
 [[bench]]
 name = "basic"
