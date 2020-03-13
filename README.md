@@ -41,7 +41,7 @@ Flume is implemented in just a few hundred lines of code and has very few depend
 
 Flume is considerably faster than `std`'s `mpsc` and often outperforms `crossbeam_channel`.
 
-The following benchmarks were performed on a quad-core 2.8 GHz Ryzen 7 CPU.
+The following benchmarks were performed on a quad-core (8 logical cores) 2.8 GHz Ryzen 7 CPU running the standard Arch Linux kernel.
 
 ```
 Create a channel
