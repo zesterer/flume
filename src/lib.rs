@@ -17,13 +17,14 @@ use std::{
     collections::VecDeque,
     sync::{Arc, atomic::{AtomicUsize, Ordering}},
     time::{Duration, Instant},
+    cell::UnsafeCell,
     thread,
 };
 use std::sync::{Condvar, Mutex};
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct SendError<T: Send + 'static>(T);
+pub struct SendError<T>(T);
 
 /// An error that may be emitted when attempting to wait for a value on a receiver.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -55,24 +56,24 @@ impl<T> Queue<T> {
     fn pop(&mut self) -> Option<T> { self.0.pop_front() }
 }
 
-struct Shared<T: Send + 'static> {
+struct Shared<T> {
     queue: spin::Mutex<Queue<T>>,
-    // Mutex and Condvar used for notifying the receiver about incoming messages. The inner bool is
-    // used to indicate that all senders have been dropped and that the channe is 'dead'.
+    /// Mutex and Condvar used for notifying the receiver about incoming messages. The inner bool is
+    /// used to indicate that all senders have been dropped and that the channe is 'dead'.
     recv_lock: Mutex<bool>,
     send_trigger: Condvar,
-    // The number of senders associated with this channel. If this drops to 0, the channel is
-    // 'dead' and the listener will begin reporting disconnect errors (once the queue has been
-    // drained).
+    /// The number of senders associated with this channel. If this drops to 0, the channel is
+    /// 'dead' and the listener will begin reporting disconnect errors (once the queue has been
+    /// drained).
     senders: AtomicUsize,
-    // An atomic used to describe the state of the receiving end of the queue
-    // - 0 => Receiver has been dropped, so the channel is 'dead'
-    // - 1 => Receiver still exists, but is not waiting for notifications
-    // - x => Receiver is waiting for incoming message notifications
+    /// An atomic used to describe the state of the receiving end of the queue
+    /// - 0 => Receiver has been dropped, so the channel is 'dead'
+    /// - 1 => Receiver still exists, but is not waiting for notifications
+    /// - x => Receiver is waiting for incoming message notifications
     listen_mode: AtomicUsize,
 }
 
-impl<T: Send + 'static> Shared<T> {
+impl<T> Shared<T> {
     fn send(&self, msg: T) -> Result<(), SendError<T>> {
         loop {
             // Attempt to gain exclusive access to the queue
@@ -231,11 +232,14 @@ impl<T: Send + 'static> Shared<T> {
 }
 
 /// A transmitting end of a channel.
-pub struct Sender<T: Send + 'static> {
+pub struct Sender<T> {
     shared: Arc<Shared<T>>,
+    /// Used to prevent Sync being implemented for this type - we never actually use it!
+    /// TODO: impl<T> !Sync for Sender<T> {} when negative traits are stable
+    _phantom_cell: UnsafeCell<()>,
 }
 
-impl<T: Send + 'static> Sender<T> {
+impl<T> Sender<T> {
     /// Attempt to send a value into the channel, returning an error if the channel receiver has
     /// been dropped.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
@@ -243,14 +247,14 @@ impl<T: Send + 'static> Sender<T> {
     }
 }
 
-impl<T: Send + 'static> Clone for Sender<T> {
+impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.shared.senders.fetch_add(1, Ordering::Relaxed);
-        Self { shared: self.shared.clone() }
+        Self { shared: self.shared.clone(), _phantom_cell: UnsafeCell::new(()) }
     }
 }
 
-impl<T: Send + 'static> Drop for Sender<T> {
+impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         // Notify the receiver that all senders have been dropped if the number of senders drops
         // to 0. Note that `fetch_add` returns the old value, so we test for 1.
@@ -261,11 +265,14 @@ impl<T: Send + 'static> Drop for Sender<T> {
 }
 
 /// The receiving end of a channel.
-pub struct Receiver<T: Send + 'static> {
+pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
+    /// Used to prevent Sync being implemented for this type - we never actually use it!
+    /// TODO: impl<T> !Sync for Receiver<T> {} when negative traits are stable
+    _phantom_cell: UnsafeCell<()>,
 }
 
-impl<T: Send + 'static> Receiver<T> {
+impl<T> Receiver<T> {
     /// Wait for an incoming value on this receiver, returning an error if all channel senders have
     /// been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
@@ -293,17 +300,17 @@ impl<T: Send + 'static> Receiver<T> {
     /// A blocking iterator over the values received on the channel that finishes iteration when
     /// all receivers of the channel have been dropped.
     pub fn iter(&self) -> impl Iterator<Item=T> + '_ {
-        Iter { shared: &self.shared }
+        Iter { receiver: &self }
     }
 
     /// A non-blocking iterator over the values received on the channel that finishes iteration
     /// when all receivers of the channel have been dropped or the channel is empty.
     pub fn try_iter(&self) -> impl Iterator<Item=T> + '_ {
-        TryIter { shared: &self.shared }
+        TryIter { receiver: &self }
     }
 }
 
-impl<T: Send + 'static> IntoIterator for Receiver<T> {
+impl<T> IntoIterator for Receiver<T> {
     type Item = T;
     type IntoIter = IntoIter<T>;
 
@@ -312,7 +319,7 @@ impl<T: Send + 'static> IntoIterator for Receiver<T> {
     }
 }
 
-impl<T: Send + 'static> Drop for Receiver<T> {
+impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let listen_mode = self.shared.listen_mode.fetch_sub(1, Ordering::Relaxed);
 
@@ -323,37 +330,37 @@ impl<T: Send + 'static> Drop for Receiver<T> {
 }
 
 /// An iterator over the items received from a channel.
-pub struct Iter<'a, T: Send + 'static> {
-    shared: &'a Shared<T>,
+pub struct Iter<'a, T> {
+    receiver: &'a Receiver<T>,
 }
 
-impl<'a, T: Send + 'static> Iterator for Iter<'a, T> {
+impl<'a, T> Iterator for Iter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.shared.recv().ok()
+        self.receiver.shared.recv().ok()
     }
 }
 
 /// An non-blocking iterator over the items received from a channel.
-pub struct TryIter<'a, T: Send + 'static> {
-    shared: &'a Shared<T>,
+pub struct TryIter<'a, T> {
+    receiver: &'a Receiver<T>,
 }
 
-impl<'a, T: Send + 'static> Iterator for TryIter<'a, T> {
+impl<'a, T> Iterator for TryIter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.shared.try_recv().ok()
+        self.receiver.shared.try_recv().ok()
     }
 }
 
 /// An owned iterator over the items received from a channel.
-pub struct IntoIter<T: Send + 'static> {
+pub struct IntoIter<T> {
     receiver: Receiver<T>,
 }
 
-impl<T: Send + 'static> Iterator for IntoIter<T> {
+impl<T> Iterator for IntoIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -375,7 +382,7 @@ impl<T: Send + 'static> Iterator for IntoIter<T> {
 /// tx.send(42).unwrap();
 /// assert_eq!(rx.recv().unwrap(), 42);
 /// ```
-pub fn channel<T: Send + 'static>() -> (Sender<T>, Receiver<T>) {
+pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         queue: spin::Mutex::new(Queue::new()),
         recv_lock: Mutex::new(false),
@@ -384,7 +391,7 @@ pub fn channel<T: Send + 'static>() -> (Sender<T>, Receiver<T>) {
         listen_mode: AtomicUsize::new(1),
     });
     (
-        Sender { shared: shared.clone() },
-        Receiver { shared },
+        Sender { shared: shared.clone(), _phantom_cell: UnsafeCell::new(()) },
+        Receiver { shared, _phantom_cell: UnsafeCell::new(()) },
     )
 }
