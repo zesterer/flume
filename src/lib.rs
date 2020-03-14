@@ -48,7 +48,7 @@ pub enum RecvTimeoutError {
 
 /// Wrapper around a queue. This wrapper exists to permit adding a maximum length (for bounded
 /// queues) later.
-struct Queue<T>(VecDeque<T>);
+struct Queue<T> (VecDeque<T>);
 
 impl<T> Queue<T> {
     fn new() -> Self { Self(VecDeque::new()) }
@@ -151,6 +151,8 @@ impl<T> Shared<T> {
                         // Indicate to future senders that we'll need to be woken up since we're
                         // going to wait upon the condvar trigger.
                         self.listen_mode.store(2, Ordering::Relaxed);
+                        // Take a guard of the mutex, but do so while the queue is still locked.
+                        // This prevents a deadlock situation occurring.
                         Some(guard
                             .unwrap_or_else(|| self.recv_lock.lock().unwrap()))
                     },
@@ -166,6 +168,8 @@ impl<T> Shared<T> {
                 .map(|guard| **guard)
                 .unwrap_or(false);
 
+            // If the channel has been disconnected there's no more waiting to be done
+            // anyway, so get rid of the guard.
             if let (Some(g), false) = (guard.take(), disconnected) {
                 // Sleep using the guard we took while probing the queue if the queue is empty
                 guard = Some(self.send_trigger.wait(g).unwrap());
@@ -173,12 +177,6 @@ impl<T> Shared<T> {
                 // If the queue isn't empty, assume that something else is using the queue, so
                 // yield to the OS scheduler.
                 thread::yield_now();
-            }
-
-            if guard.is_none() {
-                // Ensure we reset the listen mode to avoid senders performing unnecessary wakeups
-                // TODO: Only do this if we've just dropped the guard, not every iteration
-                self.listen_mode.store(1, Ordering::Relaxed);
             }
         };
         // Ensure the listen mode is reset
