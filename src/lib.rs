@@ -322,18 +322,22 @@ pub struct Sender<T> {
 }
 
 impl<T> Sender<T> {
-    /// Attempt to send a value into the channel, returning an error if the channel receiver has
-    /// been dropped.
+    /// Send a value into the channel, returning an error if the channel receiver has
+    /// been dropped. If the channel is bounded and is full, this method will block.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         self.shared.send(msg)
     }
 
+    /// Attempt to send a value into the channel. If the channel is bounded and full, or the
+    /// receiver has been dropped, an error is returned.
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
         self.shared.try_send(msg)
     }
 }
 
 impl<T> Clone for Sender<T> {
+    /// Clone this sender. [`Sender`] acts as a handle to a channel, and the channel will only be
+    /// cleaned up when all senders and the receiver have been dropped.
     fn clone(&self) -> Self {
         self.shared.senders.fetch_add(1, Ordering::Relaxed);
         Self { shared: self.shared.clone() }
@@ -485,6 +489,21 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     )
 }
 
+/// Create a new channel with an upper bound.
+///
+/// Create an bounded channel with a [`Sender`] and [`Receiver`] connected to each end
+/// respectively. Values sent in one end of the channel will be received on the other end. The
+/// channel is thread-safe, and both sender and receiver may be sent to threads as necessary. In
+/// addition, [`Sender`] may be cloned. If there is no space left for new messages, calls to
+/// [`Sender::send`] will block (unblocking once a receiver has made space).
+///
+/// # Examples
+/// ```
+/// let (tx, rx) = flume::bounded(32);
+///
+/// tx.send(42).unwrap();
+/// assert_eq!(rx.recv().unwrap(), 42);
+/// ```
 pub fn bounded<T>(n: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         queue: spin::Mutex::new(Queue::bounded(n)),
