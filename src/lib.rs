@@ -94,23 +94,31 @@ struct Shared<T> {
 
 impl<T> Shared<T> {
     fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        let mut queue = self.queue.lock();
-        let listen_mode = self.listen_mode.load(Ordering::Relaxed);
-        // If the listener has disconnected, the channel is dead
-        if listen_mode == 0 {
-            Err(TrySendError::Disconnected(msg))
-        } else {
-            // If pushing fails, it's because the queue is full
-            if let Some(msg) = queue.push(msg) {
-                return Err(TrySendError::Full(msg));
-            } else if listen_mode > 1 {
-                // Notify the receiver of a new message if listeners are waiting
-                let _ = self.wait_lock.lock().unwrap();
-                // Drop the queue early to avoid a deadlock
-                drop(queue);
-                self.send_trigger.notify_one();
+        loop {
+            // Attempt to lock the queue. Upon success, attempt to receive. If the queue is empty,
+            // we don't block anyway so just break out of the loop.
+            if let Some(mut queue) = self.queue.try_lock() {
+                let listen_mode = self.listen_mode.load(Ordering::Relaxed);
+                // If the listener has disconnected, the channel is dead
+                if listen_mode == 0 {
+                    break Err(TrySendError::Disconnected(msg));
+                } else {
+                    // If pushing fails, it's because the queue is full
+                    if let Some(msg) = queue.push(msg) {
+                        break Err(TrySendError::Full(msg));
+                    } else if listen_mode > 1 {
+                        // Notify the receiver of a new message if listeners are waiting
+                        let _ = self.wait_lock.lock().unwrap();
+                        // Drop the queue early to avoid a deadlock
+                        drop(queue);
+                        self.send_trigger.notify_one();
+                    }
+                    break Ok(());
+                }
+            } else {
+                // If we can't gain access to the queue, yield until the next time slice
+                thread::yield_now();
             }
-            Ok(())
         }
     }
 
