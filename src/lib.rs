@@ -61,7 +61,7 @@ impl<T> Queue<T> {
     fn bounded(n: usize) -> Self { Self(VecDeque::new(), Some(n)) }
 
     fn push(&mut self, x: T) -> Option<T> {
-        if self.1.map(|b| b == self.0.len()).unwrap_or(false) {
+        if Some(self.0.len()) == self.1 {
             Some(x)
         } else {
             self.0.push_back(x);
@@ -69,10 +69,8 @@ impl<T> Queue<T> {
         }
     }
 
-    fn pop(&mut self) -> Option<(T, bool)> {
-        self.0
-            .pop_front()
-            .map(|x| (x, Some(self.0.len() + 1) == self.1))
+    fn pop(&mut self) -> Option<T> {
+        self.0.pop_front()
     }
 }
 
@@ -100,16 +98,18 @@ impl<T> Shared<T> {
             // Attempt to lock the queue. Upon success, attempt to receive. If the queue is empty,
             // we don't block anyway so just break out of the loop.
             if let Some(mut queue) = self.queue.try_lock() {
+                let listen_mode = self.listen_mode.load(Ordering::Relaxed);
                 break queue
                     .push(msg)
-                    .map(|msg| if self.listen_mode.load(Ordering::Relaxed) == 0 {
+                    .map(|msg| if listen_mode == 0 {
                         Err(TrySendError::Disconnected(msg))
                     } else {
                         Err(TrySendError::Empty(msg))
                     })
                     .unwrap_or_else(|| {
-                        if self.listen_mode.load(Ordering::Relaxed) > 1 {
+                        if listen_mode > 1 {
                             let _ = self.send_trigger.0.lock().unwrap();
+                            drop(queue);
                             self.send_trigger.1.notify_one();
                         }
                         Ok(())
@@ -122,10 +122,9 @@ impl<T> Shared<T> {
     }
 
     fn send(&self, mut msg: T) -> Result<(), SendError<T>> {
-        let mut guard = None;
         loop {
             // Attempt to gain exclusive access to the queue
-            guard = if let Some(mut queue) = self.queue.try_lock() {
+            let guard = if let Some(mut queue) = self.queue.try_lock() {
                 let listen_mode = self.listen_mode.load(Ordering::Relaxed);
                 // If list_mode is 0, it means that the receiver has been dropped
                 if listen_mode == 0 {
@@ -148,7 +147,7 @@ impl<T> Shared<T> {
                         Some(m) => {
                             msg = m;
                             self.send_waiters.fetch_add(1, Ordering::Acquire);
-                            Some(guard.unwrap_or_else(|| self.recv_trigger.0.lock().unwrap()))
+                            Some(self.recv_trigger.0.lock().unwrap())
                         },
                     }
                 }
@@ -168,8 +167,8 @@ impl<T> Shared<T> {
                 break Err(SendError(msg));
             }
 
-            if let Some(g) = guard.take() {
-                self.recv_trigger.1.wait(g).unwrap();
+            if let Some(g) = guard {
+                let _ = self.recv_trigger.1.wait(g).unwrap();
                 self.send_waiters.fetch_sub(1, Ordering::Release);
             } else {
                 thread::yield_now();
@@ -196,7 +195,6 @@ impl<T> Shared<T> {
             // we don't block anyway so just break out of the loop.
             if let Some(mut queue) = self.queue.try_lock() {
                 let popped = queue.pop();
-                drop(queue);
                 break popped
                     // If there's nothing more in the queue, consider whether this might be because
                     // there are no more senders.
@@ -205,9 +203,10 @@ impl<T> Shared<T> {
                     } else {
                         TryRecvError::Empty
                     })
-                    .map(|(msg, notify)| {
-                        if notify {
+                    .map(|msg| {
+                        if self.send_waiters.load(Ordering::Relaxed) > 0 {
                             let _ = self.recv_trigger.0.lock().unwrap();
+                            drop(queue);
                             self.recv_trigger.1.notify_one();
                         }
                         msg
@@ -220,16 +219,15 @@ impl<T> Shared<T> {
     }
 
     fn recv(&self) -> Result<T, RecvError> {
-        let mut guard = None;
         let mut disconnected = false;
 
         let result = loop {
             // Attempt to gain exclusive access to the queue
-            guard = if let Some(mut queue) = self.queue.try_lock() {
+            let guard = if let Some(mut queue) = self.queue.try_lock() {
                 match queue.pop() {
                     // We've got the message we wanted
-                    Some((msg, notify)) => {
-                        if self.send_waiters.load(Ordering::Relaxed) > 0 {
+                    Some(msg) => {
+                        if queue.1.is_some() && self.send_waiters.load(Ordering::Relaxed) > 0 {
                             let _ = self.recv_trigger.0.lock().unwrap();
                             drop(queue);
                             self.recv_trigger.1.notify_one();
@@ -242,11 +240,10 @@ impl<T> Shared<T> {
                     None => {
                         // Indicate to future senders that we'll need to be woken up since we're
                         // going to wait upon the condvar trigger.
-                        self.listen_mode.store(2, Ordering::Acquire);
+                        self.listen_mode.store(2, Ordering::Relaxed);
                         // Take a guard of the mutex, but do so while the queue is still locked.
                         // This prevents a deadlock situation occurring.
-                        Some(guard
-                            .unwrap_or_else(|| self.send_trigger.0.lock().unwrap()))
+                        Some(self.send_trigger.0.lock().unwrap())
                     },
                 }
             } else {
@@ -262,9 +259,9 @@ impl<T> Shared<T> {
 
             // If the channel has been disconnected there's no more waiting to be done
             // anyway, so get rid of the guard.
-            if let (Some(g), false) = (guard.take(), disconnected) {
+            if let (Some(g), false) = (guard, disconnected) {
                 // Sleep using the guard we took while probing the queue if the queue is empty
-                guard = Some(self.send_trigger.1.wait(g).unwrap());
+                let _ = self.send_trigger.1.wait(g).unwrap();
             } else {
                 // If the queue isn't empty, assume that something else is using the queue, so
                 // yield to the OS scheduler.
@@ -324,9 +321,6 @@ impl<T> Shared<T> {
 /// A transmitting end of a channel.
 pub struct Sender<T> {
     shared: Arc<Shared<T>>,
-    /// Used to prevent Sync being implemented for this type - we never actually use it!
-    /// TODO: impl<T> !Sync for Sender<T> {} when negative traits are stable
-    _phantom_cell: UnsafeCell<()>,
 }
 
 impl<T> Sender<T> {
@@ -344,7 +338,7 @@ impl<T> Sender<T> {
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.shared.senders.fetch_add(1, Ordering::Relaxed);
-        Self { shared: self.shared.clone(), _phantom_cell: UnsafeCell::new(()) }
+        Self { shared: self.shared.clone() }
     }
 }
 
@@ -487,7 +481,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
         listen_mode: AtomicUsize::new(1),
     });
     (
-        Sender { shared: shared.clone(), _phantom_cell: UnsafeCell::new(()) },
+        Sender { shared: shared.clone() },
         Receiver { shared, _phantom_cell: UnsafeCell::new(()) },
     )
 }
@@ -502,7 +496,7 @@ pub fn bounded<T>(n: usize) -> (Sender<T>, Receiver<T>) {
         listen_mode: AtomicUsize::new(1),
     });
     (
-        Sender { shared: shared.clone(), _phantom_cell: UnsafeCell::new(()) },
+        Sender { shared: shared.clone() },
         Receiver { shared, _phantom_cell: UnsafeCell::new(()) },
     )
 }

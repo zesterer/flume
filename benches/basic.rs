@@ -209,7 +209,7 @@ fn test_robin_b<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize) {
     let (mut main_tx, main_rx) = S::bounded(1);
 
     for _ in 0..thread_num {
-        let (mut tx, rx) = S::bounded(25);
+        let (mut tx, rx) = S::bounded(1);
         std::mem::swap(&mut tx, &mut main_tx);
 
         thread::spawn(move || {
@@ -287,10 +287,10 @@ fn robin_u_4t_1000m(b: &mut Criterion) {
     b.bench_function("robin-u-4t-1000m-std", |b| test_robin_u::<mpsc::Sender<u32>>(b, 4, 1000));
 }
 
-fn robin_b_32t_1m(b: &mut Criterion) {
-    b.bench_function("robin-b-32t-1m-flume", |b| test_robin_b::<flume::Sender<u32>>(b, 32, 1));
-    b.bench_function("robin-b-32t-1m-crossbeam", |b| test_robin_b::<crossbeam_channel::Sender<u32>>(b, 32, 1));
-    b.bench_function("robin-b-32t-1m-std", |b| test_robin_b::<mpsc::Sender<u32>>(b, 32, 1));
+fn robin_b_32t_16m(b: &mut Criterion) {
+    b.bench_function("robin-b-32t-16m-flume", |b| test_robin_b::<flume::Sender<u32>>(b, 32, 16));
+    b.bench_function("robin-b-32t-16m-crossbeam", |b| test_robin_b::<crossbeam_channel::Sender<u32>>(b, 32, 16));
+    b.bench_function("robin-b-32t-16m-std", |b| test_robin_b::<mpsc::Sender<u32>>(b, 32, 16));
 }
 
 fn robin_b_4t_1000m(b: &mut Criterion) {
@@ -310,7 +310,7 @@ criterion_group!(
     hydra_4t_10000m,
     robin_u_32t_1m,
     robin_u_4t_1000m,
-    robin_b_32t_1m,
+    robin_b_32t_16m,
     robin_b_4t_1000m,
 );
 criterion_main!(compare);
