@@ -236,8 +236,7 @@ impl<T> Shared<T> {
                     },
                 }
             } else {
-                // If we can't access the queue yet, revert to using the old guard (if it exists)
-                None//guard
+                None
             };
 
             // Check to see whether senders still exist
@@ -246,14 +245,13 @@ impl<T> Shared<T> {
                 .map(|guard| **guard)
                 .unwrap_or(false);
 
-            // If the channel has been disconnected there's no more waiting to be done
-            // anyway, so get rid of the guard.
+            // If the channel is still connected and we've got access to the guard, wait.
             if let (Some(g), false) = (guard, disconnected) {
                 // Sleep using the guard we took while probing the queue if the queue is empty
                 let _ = self.send_trigger.wait(g).unwrap();
             } else {
-                // If the queue isn't empty, assume that something else is using the queue, so
-                // yield to the OS scheduler.
+                // If the queue isn't accessible, assume that it's in use and yield so that
+                // whatever is using it can do its work.
                 thread::yield_now();
             }
         };
