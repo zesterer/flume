@@ -77,9 +77,10 @@ impl<T> Queue<T> {
 struct Shared<T> {
     queue: spin::Mutex<Queue<T>>,
     /// Mutex and Condvar used for notifying the receiver about incoming messages. The inner bool is
-    /// used to indicate that all senders have been dropped and that the channe is 'dead'.
-    send_trigger: (Mutex<bool>, Condvar),
-    recv_trigger: (Mutex<bool>, Condvar),
+    /// used to indicate that all senders have been dropped and that the channel is 'dead'.
+    wait_lock: Mutex<bool>,
+    send_trigger: Condvar,
+    recv_trigger: Condvar,
     /// The number of senders associated with this channel. If this drops to 0, the channel is
     /// 'dead' and the listener will begin reporting disconnect errors (once the queue has been
     /// drained).
@@ -108,9 +109,9 @@ impl<T> Shared<T> {
                     })
                     .unwrap_or_else(|| {
                         if listen_mode > 1 {
-                            let _ = self.send_trigger.0.lock().unwrap();
+                            let _ = self.wait_lock.lock().unwrap();
                             drop(queue);
-                            self.send_trigger.1.notify_one();
+                            self.send_trigger.notify_one();
                         }
                         Ok(())
                     });
@@ -138,16 +139,16 @@ impl<T> Shared<T> {
                             // TODO: Could we just check the queue length is > 1 here?
                             if listen_mode > 1 {
                                 // Notify the receiver that a new message is available
-                                let _ = self.send_trigger.0.lock().unwrap();
+                                let _ = self.wait_lock.lock().unwrap();
                                 drop(queue);
-                                self.send_trigger.1.notify_one();
+                                self.send_trigger.notify_one();
                             }
                             break Ok(());
                         },
                         Some(m) => {
                             msg = m;
                             self.send_waiters.fetch_add(1, Ordering::Acquire);
-                            Some(self.recv_trigger.0.lock().unwrap())
+                            Some(self.wait_lock.lock().unwrap())
                         },
                     }
                 }
@@ -168,7 +169,7 @@ impl<T> Shared<T> {
             }
 
             if let Some(g) = guard {
-                let _ = self.recv_trigger.1.wait(g).unwrap();
+                let _ = self.recv_trigger.wait(g).unwrap();
                 self.send_waiters.fetch_sub(1, Ordering::Release);
             } else {
                 thread::yield_now();
@@ -178,15 +179,15 @@ impl<T> Shared<T> {
 
     /// Inform the receiver that all senders have been dropped
     fn all_senders_disconnected(&self) {
-        let mut disconnected = self.send_trigger.0.lock().unwrap();
+        let mut disconnected = self.wait_lock.lock().unwrap();
         *disconnected = true;
-        self.send_trigger.1.notify_all(); // TODO: notify_one instead? Which is faster?
+        self.send_trigger.notify_all(); // TODO: notify_one instead? Which is faster?
     }
 
     fn receiver_disconnected(&self) {
-        let mut disconnected = self.recv_trigger.0.lock().unwrap();
+        let mut disconnected = self.wait_lock.lock().unwrap();
         *disconnected = true;
-        self.recv_trigger.1.notify_all();
+        self.recv_trigger.notify_all();
     }
 
     fn try_recv(&self) -> Result<T, TryRecvError> {
@@ -205,9 +206,9 @@ impl<T> Shared<T> {
                     })
                     .map(|msg| {
                         if self.send_waiters.load(Ordering::Relaxed) > 0 {
-                            let _ = self.recv_trigger.0.lock().unwrap();
+                            let _ = self.wait_lock.lock().unwrap();
                             drop(queue);
-                            self.recv_trigger.1.notify_one();
+                            self.recv_trigger.notify_one();
                         }
                         msg
                     });
@@ -228,9 +229,9 @@ impl<T> Shared<T> {
                     // We've got the message we wanted
                     Some(msg) => {
                         if queue.1.is_some() && self.send_waiters.load(Ordering::Relaxed) > 0 {
-                            let _ = self.recv_trigger.0.lock().unwrap();
+                            let _ = self.wait_lock.lock().unwrap();
                             drop(queue);
-                            self.recv_trigger.1.notify_one();
+                            self.recv_trigger.notify_one();
                         }
                         break Ok(msg)
                     },
@@ -243,7 +244,7 @@ impl<T> Shared<T> {
                         self.listen_mode.store(2, Ordering::Relaxed);
                         // Take a guard of the mutex, but do so while the queue is still locked.
                         // This prevents a deadlock situation occurring.
-                        Some(self.send_trigger.0.lock().unwrap())
+                        Some(self.wait_lock.lock().unwrap())
                     },
                 }
             } else {
@@ -261,7 +262,7 @@ impl<T> Shared<T> {
             // anyway, so get rid of the guard.
             if let (Some(g), false) = (guard, disconnected) {
                 // Sleep using the guard we took while probing the queue if the queue is empty
-                let _ = self.send_trigger.1.wait(g).unwrap();
+                let _ = self.send_trigger.wait(g).unwrap();
             } else {
                 // If the queue isn't empty, assume that something else is using the queue, so
                 // yield to the OS scheduler.
@@ -281,7 +282,7 @@ impl<T> Shared<T> {
             return Ok(msg);
         }
 
-        let mut guard = self.send_trigger.0.lock().unwrap();
+        let mut guard = self.wait_lock.lock().unwrap();
         // Inform senders that we're going into a listening period and need to be notified of new
         // messages.
         self.listen_mode.store(2, Ordering::Relaxed);
@@ -298,7 +299,7 @@ impl<T> Shared<T> {
 
             // Wait for the given timeout (or, at least, try to - this may complete before the
             // timeout due to spurious wakeup events).
-            let (nguard, timeout) = self.send_trigger.1.wait_timeout(guard, timeout).unwrap();
+            let (nguard, timeout) = self.send_trigger.wait_timeout(guard, timeout).unwrap();
             guard = nguard;
             if timeout.timed_out() {
                 // This was a timeout rather than a wakeup, so produce a timeout error.
@@ -474,8 +475,9 @@ impl<T> Iterator for IntoIter<T> {
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         queue: spin::Mutex::new(Queue::new()),
-        send_trigger: (Mutex::new(false), Condvar::new()),
-        recv_trigger: (Mutex::new(false), Condvar::new()),
+        wait_lock: Mutex::new(false),
+        send_trigger: Condvar::new(),
+        recv_trigger: Condvar::new(),
         senders: AtomicUsize::new(1),
         send_waiters: AtomicUsize::new(0),
         listen_mode: AtomicUsize::new(1),
@@ -489,8 +491,9 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 pub fn bounded<T>(n: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         queue: spin::Mutex::new(Queue::bounded(n)),
-        send_trigger: (Mutex::new(false), Condvar::new()),
-        recv_trigger: (Mutex::new(false), Condvar::new()),
+        wait_lock: Mutex::new(false),
+        send_trigger: Condvar::new(),
+        recv_trigger: Condvar::new(),
         senders: AtomicUsize::new(1),
         send_waiters: AtomicUsize::new(0),
         listen_mode: AtomicUsize::new(1),

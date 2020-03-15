@@ -119,7 +119,7 @@ fn send_bounded() {
     assert_eq!(rx.iter().sum::<u32>(), (0..10000).sum::<u32>() * 100);
 
     for t in ts {
-        t.join();
+        t.join().unwrap();
     }
 
     assert!(rx.recv().is_err());
@@ -183,7 +183,7 @@ fn robin() {
         });
     }
 
-    for i in 0..10000 {
+    for _ in 0..10000 {
         let main_tx = main_tx.clone();
         std::thread::spawn(move || {
             for _ in 0..msg_num {
