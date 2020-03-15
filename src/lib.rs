@@ -328,7 +328,8 @@ impl<T> Sender<T> {
     }
 
     /// Attempt to send a value into the channel. If the channel is bounded and full, or the
-    /// receiver has been dropped, an error is returned.
+    /// receiver has been dropped, an error is returned. If the channel associated with this
+    /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
         self.shared.try_send(msg)
     }
@@ -458,7 +459,7 @@ impl<T> Iterator for IntoIter<T> {
     }
 }
 
-/// Create a new channel.
+/// Create a channel with no maximum capacity.
 ///
 /// Create an unbounded channel with a [`Sender`] and [`Receiver`] connected to each end
 /// respectively. Values sent in one end of the channel will be received on the other end. The
@@ -488,20 +489,27 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     )
 }
 
-/// Create a new channel with an upper bound.
+/// Create a channel with a maximum capacity.
 ///
-/// Create an bounded channel with a [`Sender`] and [`Receiver`] connected to each end
+/// Create a bounded channel with a [`Sender`] and [`Receiver`] connected to each end
 /// respectively. Values sent in one end of the channel will be received on the other end. The
 /// channel is thread-safe, and both sender and receiver may be sent to threads as necessary. In
-/// addition, [`Sender`] may be cloned. If there is no space left for new messages, calls to
-/// [`Sender::send`] will block (unblocking once a receiver has made space).
+/// addition, [`Sender`] may be cloned.
+///
+/// Unlike an [`unbounded`] channel, if there is no space left for new messages, calls to
+/// [`Sender::send`] will block (unblocking once a receiver has made space). If blocking behaviour
+/// is not desired, [`Sender::try_send`] may be used.
 ///
 /// # Examples
 /// ```
 /// let (tx, rx) = flume::bounded(32);
 ///
-/// tx.send(42).unwrap();
-/// assert_eq!(rx.recv().unwrap(), 42);
+/// for i in 1..33 {
+///     tx.send(i).unwrap();
+/// }
+/// assert!(tx.try_send(33).is_err());
+///
+/// assert_eq!(rx.try_iter().sum::<u32>(), (1..33).sum());
 /// ```
 pub fn bounded<T>(n: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
