@@ -14,7 +14,7 @@ readme = "README.md"
 spin = "0.5"
 
 [dev-dependencies]
-crossbeam-channel = "0.3"
+crossbeam-channel = "0.4"
 criterion = "0.2"
 
 [[bench]]

@@ -24,7 +24,7 @@ use std::sync::{Condvar, Mutex};
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct SendError<T>(T);
+pub struct SendError<T>(pub T);
 
 /// An error that may be emitted when attempting to wait for a value on a receiver.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
