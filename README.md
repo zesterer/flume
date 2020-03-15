@@ -10,7 +10,7 @@ https://docs.rs/flume)
 https://github.com/zesterer/flume)
 
 ```rust
-let (tx, rx) = flume::channel();
+let (tx, rx) = flume::unbounded();
 
 thread::spawn(move || {
     for i in 0..10 {
