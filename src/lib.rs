@@ -52,8 +52,7 @@ pub enum RecvTimeoutError {
     Disconnected,
 }
 
-/// Wrapper around a queue. This wrapper exists to permit adding a maximum length (for bounded
-/// queues) later.
+/// Wrapper around a queue. This wrapper exists to permit a maximum length.
 struct Queue<T>(VecDeque<T>, Option<usize>);
 
 impl<T> Queue<T> {

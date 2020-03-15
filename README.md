@@ -21,6 +21,14 @@ let received = rx
 assert_eq!((0..10).sum(), received);
 ```
 
+## Features
+
+- Bounded/unbounded queues
+- Senders implement `Send` and may be cloned
+- No unsafe code
+- Simple design, few dependencies, very fast to compile
+- Feature parity with `std::sync::mpsc`
+
 ## Usage
 
 To use Flume, place the following line under the `[dependencies]` section in your `Cargo.toml`:
