@@ -2,8 +2,12 @@
 
 A blazingly fast multi-producer, single-consumer channel.
 
-[![Crates.io](https://img.shields.io/crates/v/flume.svg)](https://crates.io/crates/flume)
-[Documentation](https://docs.rs/flume)
+[![Cargo](https://img.shields.io/crates/v/flume.svg)](
+https://crates.io/crates/flume)
+[![Documentation](https://docs.rs/flume/badge.svg)](
+https://docs.rs/flume)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](
+https://github.com/zesterer/flume)
 
 ```rust
 let (tx, rx) = flume::channel();
