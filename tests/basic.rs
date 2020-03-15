@@ -90,7 +90,7 @@ fn try_send() {
     let (tx, rx) = bounded(5);
 
     for i in 0..5 {
-        tx.send(i).unwrap();
+        tx.try_send(i).unwrap();
     }
 
     assert!(tx.try_send(42).is_err());
@@ -98,6 +98,11 @@ fn try_send() {
     assert_eq!(rx.recv(), Ok(0));
 
     assert_eq!(tx.try_send(42), Ok(()));
+
+    assert_eq!(rx.recv(), Ok(1));
+    drop(rx);
+
+    assert!(tx.try_send(42).is_err());
 }
 
 #[test]

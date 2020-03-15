@@ -34,7 +34,7 @@ pub enum RecvError {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TrySendError<T> {
-    Empty(T),
+    Full(T),
     Disconnected(T),
 }
 
@@ -100,21 +100,22 @@ impl<T> Shared<T> {
             // we don't block anyway so just break out of the loop.
             if let Some(mut queue) = self.queue.try_lock() {
                 let listen_mode = self.listen_mode.load(Ordering::Relaxed);
-                break queue
-                    .push(msg)
-                    .map(|msg| if listen_mode == 0 {
-                        Err(TrySendError::Disconnected(msg))
-                    } else {
-                        Err(TrySendError::Empty(msg))
-                    })
-                    .unwrap_or_else(|| {
-                        if listen_mode > 1 {
-                            let _ = self.wait_lock.lock().unwrap();
-                            drop(queue);
-                            self.send_trigger.notify_one();
-                        }
-                        Ok(())
-                    });
+                // If the listener has disconnected, the channel is dead
+                if listen_mode == 0 {
+                    break Err(TrySendError::Disconnected(msg));
+                } else {
+                    // If pushing fails, it's because the queue is full
+                    if let Some(msg) = queue.push(msg) {
+                        break Err(TrySendError::Full(msg));
+                    } else if listen_mode > 1 {
+                        // Notify the receiver of a new message if listeners are waiting
+                        let _ = self.wait_lock.lock().unwrap();
+                        // Drop the queue early to avoid a deadlock
+                        drop(queue);
+                        self.send_trigger.notify_one();
+                    }
+                    break Ok(());
+                }
             } else {
                 // If we can't gain access to the queue, yield until the next time slice
                 thread::yield_now();
@@ -131,25 +132,24 @@ impl<T> Shared<T> {
                 if listen_mode == 0 {
                     break Err(SendError(msg));
                 } else {
-                    match queue.push(msg) {
-                        None => {
-                            // Drop the queue early to avoid deadlocking when notifying the receiver.
-                            // If listen_mode is greater than one it means that the receiver is passively
-                            // waiting on a notification that new items have entered the queue.
-                            // TODO: Could we just check the queue length is > 1 here?
-                            if listen_mode > 1 {
-                                // Notify the receiver that a new message is available
-                                let _ = self.wait_lock.lock().unwrap();
-                                drop(queue);
-                                self.send_trigger.notify_one();
-                            }
-                            break Ok(());
-                        },
-                        Some(m) => {
-                            msg = m;
-                            self.send_waiters.fetch_add(1, Ordering::Acquire);
-                            Some(self.wait_lock.lock().unwrap())
-                        },
+                    if let Some(m) = queue.push(msg) {
+                        // If pushing fails, the queue is full: if this is the case, we increment
+                        // send_waiters to inform the receiver that we need a notification, and then we
+                        // take a lock guard to wait on later using the condvar.
+                        msg = m;
+                        self.send_waiters.fetch_add(1, Ordering::Acquire);
+                        Some(self.wait_lock.lock().unwrap())
+                    } else if listen_mode > 1 {
+                        // If listen_mode is greater than one it means that the receiver is passively
+                        // waiting on a notification that new items have entered the queue.
+                        let _ = self.wait_lock.lock().unwrap();
+                        // Drop the queue early to avoid deadlocking when notifying the receiver.
+                        drop(queue);
+                        // Tell the receiver to wake up
+                        self.send_trigger.notify_one();
+                        break Ok(());
+                    } else {
+                        break Ok(());
                     }
                 }
             } else {
@@ -162,9 +162,8 @@ impl<T> Shared<T> {
                 .map(|guard| **guard)
                 .unwrap_or(false)
             {
-                if guard.is_some() {
-                    self.send_waiters.fetch_sub(1, Ordering::Release);
-                }
+                // Normally we would decrement send_waiters here, but since the receiver has
+                // disconnected anyway, it doesn't need to know that we're not waiting any more.
                 break Err(SendError(msg));
             }
 
@@ -195,23 +194,21 @@ impl<T> Shared<T> {
             // Attempt to lock the queue. Upon success, attempt to receive. If the queue is empty,
             // we don't block anyway so just break out of the loop.
             if let Some(mut queue) = self.queue.try_lock() {
-                let popped = queue.pop();
-                break popped
-                    // If there's nothing more in the queue, consider whether this might be because
-                    // there are no more senders.
-                    .ok_or_else(|| if self.senders.load(Ordering::Relaxed) == 0 {
-                        TryRecvError::Disconnected
-                    } else {
-                        TryRecvError::Empty
-                    })
-                    .map(|msg| {
-                        if self.send_waiters.load(Ordering::Relaxed) > 0 {
-                            let _ = self.wait_lock.lock().unwrap();
-                            drop(queue);
-                            self.recv_trigger.notify_one();
-                        }
-                        msg
-                    });
+                break if let Some(msg) = queue.pop() {
+                    // If there are senders waiting for a message, wake them up.
+                    if self.send_waiters.load(Ordering::Relaxed) > 0 {
+                        let _ = self.wait_lock.lock().unwrap();
+                        drop(queue);
+                        self.recv_trigger.notify_one();
+                    }
+                    Ok(msg)
+                } else if self.senders.load(Ordering::Relaxed) == 0 {
+                    // If there's nothing more in the queue, this might be because there are no
+                    // more senders.
+                    Err(TryRecvError::Disconnected)
+                } else {
+                    Err(TryRecvError::Empty)
+                };
             } else {
                 // If we can't gain access to the queue, yield until the next time slice
                 thread::yield_now();
