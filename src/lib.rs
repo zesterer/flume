@@ -525,8 +525,7 @@ impl<'a, T> Selector<'a, T> {
         }
     }
 
-    pub fn with<U>(mut self, receiver: &'a mut Receiver<U>, mut f: impl FnMut(U) -> T + 'a) -> Self {
-        let receiver = &*receiver;
+    pub fn with<U>(mut self, receiver: &'a Receiver<U>, mut f: impl FnMut(U) -> T + 'a) -> Self {
         let token = self.selections.len();
         let selector_id = receiver.shared.connect_selector(self.signal.clone(), token);
         self.selections.push((
@@ -546,8 +545,6 @@ impl<'a, T> Selector<'a, T> {
     pub fn recv(&mut self) -> T {
         let mut token: Option<usize> = None;
         loop {
-            let mut guard = self.signal.wait_lock.lock().unwrap();
-
             // Attempt to receive a message
             let msg = match token {
                 None => self // try_recv
@@ -560,11 +557,13 @@ impl<'a, T> Selector<'a, T> {
                 break msg;
             }
 
+            let mut guard = self.signal.wait_lock.lock().unwrap();
             // Reset token
             *guard = None;
-            self.signal.listeners.fetch_add(1, Ordering::Acquire);
+            // TODO: use signal.listeners
+            //self.signal.listeners.fetch_add(1, Ordering::Acquire);
             let guard = self.signal.trigger.wait(guard).unwrap();
-            self.signal.listeners.fetch_sub(1, Ordering::Acquire);
+            //self.signal.listeners.fetch_sub(1, Ordering::Acquire);
 
             token = *guard;
         }
