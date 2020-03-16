@@ -62,7 +62,7 @@ fn recv_deadline() {
     assert!(rx.recv_deadline(then.checked_add(dur).unwrap()).is_err());
     let now = Instant::now();
 
-    let max_error = Duration::from_millis(1);
+    let max_error = Duration::from_millis(5);
     assert!(now.duration_since(then) < dur.checked_add(max_error).unwrap());
     assert!(now.duration_since(then) > dur.checked_sub(max_error).unwrap());
 
@@ -128,6 +128,23 @@ fn send_bounded() {
     }
 
     assert!(rx.recv().is_err());
+}
+
+#[test]
+fn rendezvous() {
+    return;
+
+    let (tx, rx) = bounded(0);
+
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        rx.recv().unwrap();
+    });
+
+    tx.send(()).unwrap();
+
+    t.join().unwrap();
 }
 
 #[test]
