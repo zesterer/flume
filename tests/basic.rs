@@ -218,3 +218,23 @@ fn robin() {
         }
     }
 }
+
+#[test]
+fn select() {
+    let (tx0, rx0) = unbounded();
+    let (tx1, rx1) = unbounded();
+
+    for (i, t) in vec![tx0, tx1].into_iter().enumerate() {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let _ = t.send(i);
+        });
+    }
+
+    let x = Selector::new()
+        .with(&rx0, |x| x)
+        .with(&rx1, |x| x)
+        .recv();
+
+    assert!(x == 0 || x == 1);
+}
