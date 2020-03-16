@@ -75,11 +75,13 @@ impl<T> Queue<T> {
 
 struct Shared<T> {
     queue: spin::Mutex<Queue<T>>,
-    /// Mutex and Condvar used for notifying the receiver about incoming messages. The inner bool is
-    /// used to indicate that all senders have been dropped and that the channel is 'dead'.
+    /// Mutexed used for locking condvars.
     wait_lock: Mutex<()>,
+    // Used for notifying the receiver about incoming messages.
     send_trigger: Condvar,
-    recv_trigger: Condvar,
+    // Used for notifying senders about the queue no longer being full. Therefore, this is only a
+    // `Some` for bounded queues.
+    recv_trigger: Option<Condvar>,
     /// The number of senders associated with this channel. If this drops to 0, the channel is
     /// 'dead' and the listener will begin reporting disconnect errors (once the queue has been
     /// drained).
@@ -134,16 +136,18 @@ impl<T> Shared<T> {
                 },
             };
 
-            // Take a guard of the main lock to use later when waiting
-            let guard = self.wait_lock.lock().unwrap();
-            // Inform the receiver that we need waking
-            self.send_waiters.fetch_add(1, Ordering::Acquire);
-            // We keep the queue alive until here to avoid a deadlock
-            drop(queue);
-            // Wait until we get a signal that suggests the queue might have space
-            let _ = self.recv_trigger.wait(guard).unwrap();
-            // Inform the receiver that we no longer need waking
-            self.send_waiters.fetch_sub(1, Ordering::Release);
+            if let Some(recv_trigger) = self.recv_trigger.as_ref() {
+                // Take a guard of the main lock to use later when waiting
+                let guard = self.wait_lock.lock().unwrap();
+                // Inform the receiver that we need waking
+                self.send_waiters.fetch_add(1, Ordering::Acquire);
+                // We keep the queue alive until here to avoid a deadlock
+                drop(queue);
+                // Wait until we get a signal that suggests the queue might have space
+                let _ = recv_trigger.wait(guard).unwrap();
+                // Inform the receiver that we no longer need waking
+                self.send_waiters.fetch_sub(1, Ordering::Release);
+            }
         }
     }
 
@@ -154,8 +158,10 @@ impl<T> Shared<T> {
     }
 
     fn receiver_disconnected(&self) {
-        let _ = self.wait_lock.lock().unwrap();
-        self.recv_trigger.notify_all();
+        if let Some(recv_trigger) = self.recv_trigger.as_ref() {
+            let _ = self.wait_lock.lock().unwrap();
+            recv_trigger.notify_all();
+        }
     }
 
     fn try_recv(&self) -> Result<T, (spin::MutexGuard<Queue<T>>, TryRecvError)> {
@@ -165,10 +171,12 @@ impl<T> Shared<T> {
             if let Some(mut queue) = self.queue.try_lock() {
                 break if let Some(msg) = queue.pop() {
                     // If there are senders waiting for a message, wake them up.
-                    if queue.1.is_some() && self.send_waiters.load(Ordering::Relaxed) > 0 {
-                        let _ = self.wait_lock.lock().unwrap();
-                        drop(queue);
-                        self.recv_trigger.notify_one();
+                    if let Some(recv_trigger) = self.recv_trigger.as_ref() {
+                        if queue.1.is_some() && self.send_waiters.load(Ordering::Relaxed) > 0 {
+                            let _ = self.wait_lock.lock().unwrap();
+                            drop(queue);
+                            recv_trigger.notify_one();
+                        }
                     }
                     Ok(msg)
                 } else if self.senders.load(Ordering::Relaxed) == 0 {
@@ -414,7 +422,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
         queue: spin::Mutex::new(Queue::new()),
         wait_lock: Mutex::new(()),
         send_trigger: Condvar::new(),
-        recv_trigger: Condvar::new(),
+        recv_trigger: None,
         senders: AtomicUsize::new(1),
         send_waiters: AtomicUsize::new(0),
         listen_mode: AtomicUsize::new(1),
@@ -452,7 +460,7 @@ pub fn bounded<T>(n: usize) -> (Sender<T>, Receiver<T>) {
         queue: spin::Mutex::new(Queue::bounded(n)),
         wait_lock: Mutex::new(()),
         send_trigger: Condvar::new(),
-        recv_trigger: Condvar::new(),
+        recv_trigger: Some(Condvar::new()),
         senders: AtomicUsize::new(1),
         send_waiters: AtomicUsize::new(0),
         listen_mode: AtomicUsize::new(1),
