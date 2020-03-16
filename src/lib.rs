@@ -86,8 +86,9 @@ struct Shared<T> {
     /// 'dead' and the listener will begin reporting disconnect errors (once the queue has been
     /// drained).
     senders: AtomicUsize,
+    /// The number of senders waiting for notifications that the queue has space.
     send_waiters: AtomicUsize,
-    /// An atomic used to describe the state of the receiving end of the queue
+    /// An atomic used to describe the state of the receiving end of the queue:
     /// - 0 => Receiver has been dropped, so the channel is 'dead'
     /// - 1 => Receiver still exists, but is not waiting for notifications
     /// - x => Receiver is waiting for incoming message notifications
