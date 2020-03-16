@@ -121,7 +121,7 @@ fn send_bounded() {
 
     drop(tx);
 
-    assert_eq!(rx.iter().sum::<u32>(), (0..10000).sum::<u32>() * 100);
+    assert_eq!(rx.iter().sum::<u64>(), (0..10000).sum::<u64>() * 100);
 
     for t in ts {
         t.join().unwrap();
