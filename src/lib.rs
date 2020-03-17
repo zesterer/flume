@@ -604,28 +604,27 @@ impl<'a, T> Selector<'a, T> {
     }
 
     fn wait_inner(&mut self) -> T {
-        let mut token: Option<usize> = None;
-        loop {
-            // Attempt to receive a message
-            if let Some(msg) = match token {
-                None => self // try_recv
-                    .selections
-                    .iter_mut()
-                    .find_map(|(poll, _)| poll()),
-                Some(token) => (&mut self.selections[token].0)()
-            } {
-                break msg;
-            }
+        // Speculatively poll
+        if let Some(msg) = self.poll() {
+            return msg;
+        }
 
+        loop {
             let mut guard = self.signal.wait_lock.lock().unwrap();
             // Reset token
             *guard = None;
             // TODO: use signal.listeners
             //self.signal.listeners.fetch_add(1, Ordering::Acquire);
-            let guard = self.signal.trigger.wait(guard).unwrap();
+            let token = *self.signal.trigger.wait(guard).unwrap();
             //self.signal.listeners.fetch_sub(1, Ordering::Acquire);
 
-            token = *guard;
+            // Attempt to receive a message
+            if let Some(msg) = match token {
+                None => self.poll(), // Unknown event
+                Some(token) => (&mut self.selections[token].0)()
+            } {
+                break msg;
+            }
         }
     }
 
