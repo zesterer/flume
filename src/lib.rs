@@ -79,7 +79,8 @@ struct Shared<T> {
     wait_lock: Mutex<()>,
     // Used for notifying the receiver about incoming messages.
     send_trigger: Condvar,
-    selectors: spin::RwLock<(usize, Vec<(usize, Arc<SelectorSignal>, Token)>)>,
+    send_selectors: spin::RwLock<(usize, Vec<(usize, Arc<SelectorSignal>, Token)>)>,
+    recv_selector: spin::RwLock<Option<(Arc<SelectorSignal>, Token)>>,
     // Used for notifying senders about the queue no longer being full. Therefore, this is only a
     // `Some` for bounded queues.
     recv_trigger: Option<Condvar>,
@@ -117,13 +118,12 @@ impl<T> Shared<T> {
                         drop(queue);
                         self.send_trigger.notify_one();
                     }
-                    // Notify selectors
+                    // Notify recv selector
                     self
-                        .selectors
+                        .recv_selector
                         .read()
-                        .1
-                        .iter()
-                        .for_each(|(_, signal, token)| {
+                        .as_ref()
+                        .map(|(signal, token)| {
                             let mut guard = signal.wait_lock.lock().unwrap();
                             *guard = Some(*token);
                             signal.trigger.notify_one();
@@ -191,6 +191,17 @@ impl<T> Shared<T> {
                             recv_trigger.notify_one();
                         }
                     }
+                    // Notify send selectors
+                    self
+                        .send_selectors
+                        .read()
+                        .1
+                        .iter()
+                        .for_each(|(_, signal, token)| {
+                            let mut guard = signal.wait_lock.lock().unwrap();
+                            *guard = Some(*token);
+                            signal.trigger.notify_one();
+                        });
                     Ok(msg)
                 } else if self.senders.load(Ordering::Relaxed) == 0 {
                     // If there's nothing more in the queue, this might be because there are no
@@ -271,15 +282,23 @@ impl<T> Shared<T> {
         result
     }
 
-    fn connect_selector(&self, signal: Arc<SelectorSignal>, token: Token) -> usize {
-        let (id, signals) = &mut *self.selectors.write();
+    fn connect_send_selector(&self, signal: Arc<SelectorSignal>, token: Token) -> usize {
+        let (id, signals) = &mut *self.send_selectors.write();
         *id += 1;
         signals.push((*id, signal, token));
         *id
     }
 
-    fn disconnect_selector(&self, id: usize) {
-        self.selectors.write().1.retain(|(s_id, _, _)| s_id != &id);
+    fn disconnect_send_selector(&self, id: usize) {
+        self.send_selectors.write().1.retain(|(s_id, _, _)| s_id != &id);
+    }
+
+    fn connect_recv_selector(&self, signal: Arc<SelectorSignal>, token: Token) {
+        *self.recv_selector.write() = Some((signal, token))
+    }
+
+    fn disconnect_recv_selector(&self) {
+        *self.recv_selector.write() = None;
     }
 }
 
@@ -446,7 +465,8 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
         queue: spin::Mutex::new(Queue::new()),
         wait_lock: Mutex::new(()),
         send_trigger: Condvar::new(),
-        selectors: spin::RwLock::new((0, Vec::new())),
+        send_selectors: spin::RwLock::new((0, Vec::new())),
+        recv_selector: spin::RwLock::new(None),
         recv_trigger: None,
         senders: AtomicUsize::new(1),
         send_waiters: AtomicUsize::new(0),
@@ -485,7 +505,8 @@ pub fn bounded<T>(n: usize) -> (Sender<T>, Receiver<T>) {
         queue: spin::Mutex::new(Queue::bounded(n)),
         wait_lock: Mutex::new(()),
         send_trigger: Condvar::new(),
-        selectors: spin::RwLock::new((0, Vec::new())),
+        send_selectors: spin::RwLock::new((0, Vec::new())),
+        recv_selector: spin::RwLock::new(None),
         recv_trigger: Some(Condvar::new()),
         senders: AtomicUsize::new(1),
         send_waiters: AtomicUsize::new(0),
@@ -502,7 +523,7 @@ type Token = usize;
 struct SelectorSignal {
     wait_lock: Mutex<Option<usize>>,
     trigger: Condvar,
-    listeners: AtomicUsize,
+    //listeners: AtomicUsize,
 }
 
 pub struct Selector<'a, T> {
@@ -520,40 +541,69 @@ impl<'a, T> Selector<'a, T> {
             signal: Arc::new(SelectorSignal {
                 wait_lock: Mutex::new(None),
                 trigger: Condvar::new(),
-                listeners: AtomicUsize::new(0)
+                //listeners: AtomicUsize::new(0)
             }),
         }
     }
 
-    pub fn with<U>(mut self, receiver: &'a Receiver<U>, mut f: impl FnMut(U) -> T + 'a) -> Self {
+    pub fn send<U>(mut self, sender: &'a Sender<U>, msg: U, mut f: impl FnMut(Result<(), SendError<U>>) -> T + 'a) -> Self {
         let token = self.selections.len();
-        let selector_id = receiver.shared.connect_selector(self.signal.clone(), token);
+        let selector_id = sender.shared.connect_send_selector(self.signal.clone(), token);
+        let mut msg = Some(msg);
         self.selections.push((
-            Box::new(move || receiver.try_recv().ok().map(&mut f)),
-            Box::new(move || receiver.shared.disconnect_selector(selector_id)),
+            Box::new(move || {
+                match sender.try_send(msg.take().unwrap()) {
+                    Ok(()) => {
+                        msg = None;
+                        Some((&mut f)(Ok(())))
+                    },
+                    Err(TrySendError::Disconnected(m)) => {
+                        msg = None;
+                        Some((&mut f)(Err(SendError(m))))
+                    },
+                    Err(TrySendError::Full(m)) => {
+                        msg = Some(m);
+                        None
+                    },
+                }
+            }),
+            Box::new(move || sender.shared.disconnect_send_selector(selector_id)),
         ));
         self
     }
 
-    pub fn try_recv(&mut self) -> Option<T> {
+    pub fn recv<U>(mut self, receiver: &'a Receiver<U>, mut f: impl FnMut(Result<U, RecvError>) -> T + 'a) -> Self {
+        let token = self.selections.len();
+        receiver.shared.connect_recv_selector(self.signal.clone(), token);
+        self.selections.push((
+            Box::new(move || match receiver.try_recv() {
+                Ok(msg) => Some((&mut f)(Ok(msg))),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some((&mut f)(Err(RecvError::Disconnected))),
+            }),
+            Box::new(move || receiver.shared.disconnect_recv_selector()),
+        ));
+        self
+    }
+
+    pub fn try_wait(mut self) -> Option<T> {
         self
             .selections
             .iter_mut()
             .find_map(|(poll, _)| poll())
     }
 
-    pub fn recv(&mut self) -> T {
+    pub fn wait(mut self) -> T {
         let mut token: Option<usize> = None;
         loop {
             // Attempt to receive a message
-            let msg = match token {
+            if let Some(msg) = match token {
                 None => self // try_recv
                     .selections
                     .iter_mut()
                     .find_map(|(poll, _)| poll()),
                 Some(token) => (&mut self.selections[token].0)()
-            };
-            if let Some(msg) = msg {
+            } {
                 break msg;
             }
 

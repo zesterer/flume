@@ -221,10 +221,10 @@ fn robin() {
 
 #[test]
 fn select() {
-    let (tx0, rx0) = unbounded();
+    let (tx0, rx0) = bounded(1);
     let (tx1, rx1) = unbounded();
 
-    for (i, t) in vec![tx0, tx1].into_iter().enumerate() {
+    for (i, t) in vec![tx0.clone(), tx1].into_iter().enumerate() {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(100));
             let _ = t.send(i);
@@ -232,9 +232,25 @@ fn select() {
     }
 
     let x = Selector::new()
-        .with(&rx0, |x| x)
-        .with(&rx1, |x| x)
-        .recv();
+        .recv(&rx0, |x| x)
+        .recv(&rx1, |x| x)
+        .wait()
+        .unwrap();
 
     assert!(x == 0 || x == 1);
+
+    tx0.send(0).unwrap();
+
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(0, rx0.recv().unwrap());
+        assert_eq!(42, rx0.recv().unwrap());
+    });
+
+    Selector::new()
+        .send(&tx0, 42, |x| x)
+        .wait()
+        .unwrap();
+
+    t.join().unwrap();
 }
