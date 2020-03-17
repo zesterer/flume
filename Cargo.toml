@@ -10,6 +10,10 @@ categories = ["concurrency", "data-structures"]
 license = "Apache-2.0/MIT"
 readme = "README.md"
 
+[features]
+select = []
+default = ["select"]
+
 [dependencies]
 spin = "0.5"
 

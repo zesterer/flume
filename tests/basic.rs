@@ -62,7 +62,7 @@ fn recv_deadline() {
     assert!(rx.recv_deadline(then.checked_add(dur).unwrap()).is_err());
     let now = Instant::now();
 
-    let max_error = Duration::from_millis(5);
+    let max_error = Duration::from_millis(10);
     assert!(now.duration_since(then) < dur.checked_add(max_error).unwrap());
     assert!(now.duration_since(then) > dur.checked_sub(max_error).unwrap());
 
@@ -219,15 +219,19 @@ fn robin() {
     }
 }
 
+#[cfg(feature = "select")]
 #[test]
 fn select() {
+    #[derive(Debug, PartialEq)]
+    struct Foo(usize);
+
     let (tx0, rx0) = bounded(1);
     let (tx1, rx1) = unbounded();
 
     for (i, t) in vec![tx0.clone(), tx1].into_iter().enumerate() {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            let _ = t.send(i);
+            let _ = t.send(Foo(i));
         });
     }
 
@@ -237,18 +241,22 @@ fn select() {
         .wait()
         .unwrap();
 
-    assert!(x == 0 || x == 1);
+    if x == Foo(0) {
+        assert!(rx1.recv().unwrap() == Foo(1));
+    } else {
+        assert!(rx0.recv().unwrap() == Foo(0));
+    }
 
-    tx0.send(0).unwrap();
+    tx0.send(Foo(42)).unwrap();
 
     let t = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        assert_eq!(0, rx0.recv().unwrap());
-        assert_eq!(42, rx0.recv().unwrap());
+        assert_eq!(rx0.recv().unwrap(), Foo(42));
+        assert_eq!(rx0.recv().unwrap(), Foo(43));
     });
 
     Selector::new()
-        .send(&tx0, 42, |x| x)
+        .send(&tx0, Foo(43), |x| x)
         .wait()
         .unwrap();
 
