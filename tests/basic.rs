@@ -132,7 +132,7 @@ fn send_bounded() {
 
 #[test]
 fn rendezvous() {
-    return;
+    return; // TODO: Correct rendezvous behaviour
 
     let (tx, rx) = bounded(0);
 

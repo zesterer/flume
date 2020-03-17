@@ -4,6 +4,22 @@ use crate::*;
 ///
 /// A [`Selector`] implements [`select`](https://en.wikipedia.org/wiki/Select_(Unix))-like behaviour,
 /// allowing a thread to wait upon the result of more than one operation at once.
+///
+/// # Examples
+/// ```
+/// let (tx0, rx0) = flume::unbounded();
+/// let (tx1, rx1) = flume::unbounded();
+///
+/// std::thread::spawn(move || {
+///     tx0.send(true).unwrap();
+///     tx1.send(42).unwrap();
+/// });
+///
+/// flume::Selector::new()
+///     .recv(&rx0, |b| println!("Received {:?}", b))
+///     .recv(&rx1, |n| println!("Received {:?}", n))
+///     .wait();
+/// ```
 pub struct Selector<'a, T: 'a> {
     selections: Vec<(
         Box<dyn FnMut() -> Option<T> + 'a>, // Poll
