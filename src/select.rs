@@ -20,7 +20,7 @@ use crate::*;
 ///     .recv(&rx1, |n| println!("Received {:?}", n))
 ///     .wait();
 /// ```
-pub struct Selector<'a, T: 'a> {
+pub struct Selector<'a, T> {
     selections: Vec<(
         Box<dyn FnMut() -> Option<T> + 'a>, // Poll
         Box<dyn FnMut() + 'a>, // Drop
@@ -28,7 +28,7 @@ pub struct Selector<'a, T: 'a> {
     signal: Arc<SelectorSignal>,
 }
 
-impl<'a, T: 'a> Selector<'a, T> {
+impl<'a, T> Selector<'a, T> {
     /// Create a new selector.
     pub fn new() -> Self {
         Self {
@@ -135,23 +135,23 @@ impl<'a, T: 'a> Selector<'a, T> {
     }
 
     /// Create an iterator over incoming events on this [`Selector`].
-    pub fn iter<'b: 'a>(&'b mut self) -> SelectorIter<'b, T> {
+    pub fn iter(&mut self) -> SelectorIter<'a, '_, T> {
         SelectorIter { selector: self }
     }
 
     /// Create an iterator over pending events on this [`Selector`]. This iterator will only
     /// produce values while there are events immediately available to handle.
-    pub fn try_iter<'b: 'a>(&'b mut self) -> SelectorTryIter<'b, T> {
+    pub fn try_iter(&mut self) -> SelectorTryIter<'a, '_, T> {
         SelectorTryIter { selector: self }
     }
 }
 
 /// An iterator over the events received by a [`Selector`].
-pub struct SelectorIter<'a, T: 'a> {
-    selector: &'a mut Selector<'a, T>,
+pub struct SelectorIter<'a, 'b, T> {
+    selector: &'b mut Selector<'a, T>,
 }
 
-impl<'a, T> Iterator for SelectorIter<'a, T> {
+impl<'a, 'b, T> Iterator for SelectorIter<'a, 'b, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -160,11 +160,11 @@ impl<'a, T> Iterator for SelectorIter<'a, T> {
 }
 
 /// An iterator over the pending events received by a [`Selector`].
-pub struct SelectorTryIter<'a, T: 'a> {
-    selector: &'a mut Selector<'a, T>,
+pub struct SelectorTryIter<'a, 'b, T> {
+    selector: &'b mut Selector<'a, T>,
 }
 
-impl<'a, T> Iterator for SelectorTryIter<'a, T> {
+impl<'a, 'b, T> Iterator for SelectorTryIter<'a, 'b, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
