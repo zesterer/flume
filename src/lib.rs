@@ -526,6 +526,10 @@ struct SelectorSignal {
     //listeners: AtomicUsize,
 }
 
+/// A type used to wait upon multiple blocking operations at once.
+///
+/// A [`Selector`] implements [`select`](https://en.wikipedia.org/wiki/Select_(Unix))-like behaviour,
+/// allowing a thread to wait upon the result of more than one operation at once.
 pub struct Selector<'a, T> {
     selections: Vec<(
         Box<dyn FnMut() -> Option<T> + 'a>, // Poll
@@ -535,6 +539,7 @@ pub struct Selector<'a, T> {
 }
 
 impl<'a, T> Selector<'a, T> {
+    /// Create a new selector.
     pub fn new() -> Self {
         Self {
             selections: Vec::new(),
@@ -546,25 +551,33 @@ impl<'a, T> Selector<'a, T> {
         }
     }
 
+    /// Add a send operation to the selector.
+    ///
+    /// Once added, the selector can be used to run the provided handler function on completion of
+    /// this operation.
     pub fn send<U>(mut self, sender: &'a Sender<U>, msg: U, mut f: impl FnMut(Result<(), SendError<U>>) -> T + 'a) -> Self {
         let token = self.selections.len();
         let selector_id = sender.shared.connect_send_selector(self.signal.clone(), token);
         let mut msg = Some(msg);
         self.selections.push((
             Box::new(move || {
-                match sender.try_send(msg.take().unwrap()) {
-                    Ok(()) => {
-                        msg = None;
-                        Some((&mut f)(Ok(())))
-                    },
-                    Err(TrySendError::Disconnected(m)) => {
-                        msg = None;
-                        Some((&mut f)(Err(SendError(m))))
-                    },
-                    Err(TrySendError::Full(m)) => {
-                        msg = Some(m);
-                        None
-                    },
+                if let Some(m) = msg.take() {
+                    match sender.try_send(m) {
+                        Ok(()) => {
+                            msg = None;
+                            Some((&mut f)(Ok(())))
+                        },
+                        Err(TrySendError::Disconnected(m)) => {
+                            msg = None;
+                            Some((&mut f)(Err(SendError(m))))
+                        },
+                        Err(TrySendError::Full(m)) => {
+                            msg = Some(m);
+                            None
+                        },
+                    }
+                } else {
+                    None
                 }
             }),
             Box::new(move || sender.shared.disconnect_send_selector(selector_id)),
@@ -572,6 +585,10 @@ impl<'a, T> Selector<'a, T> {
         self
     }
 
+    /// Add a receive operation to the selector.
+    ///
+    /// Once added, the selector can be used to run the provided handler function on completion of
+    /// this operation.
     pub fn recv<U>(mut self, receiver: &'a Receiver<U>, mut f: impl FnMut(Result<U, RecvError>) -> T + 'a) -> Self {
         let token = self.selections.len();
         receiver.shared.connect_recv_selector(self.signal.clone(), token);
@@ -586,14 +603,7 @@ impl<'a, T> Selector<'a, T> {
         self
     }
 
-    pub fn try_wait(mut self) -> Option<T> {
-        self
-            .selections
-            .iter_mut()
-            .find_map(|(poll, _)| poll())
-    }
-
-    pub fn wait(mut self) -> T {
+    fn wait_inner(&mut self) -> T {
         let mut token: Option<usize> = None;
         loop {
             // Attempt to receive a message
@@ -617,6 +627,29 @@ impl<'a, T> Selector<'a, T> {
 
             token = *guard;
         }
+    }
+
+    /// Poll each event associated with this [`Selector`] to see whether any have completed. If
+    /// more than one event has completed, a random event handler will be run and its return value
+    /// returned. If none of the events have completed a `None` is returned.
+    pub fn poll(&mut self) -> Option<T> {
+        self
+            .selections
+            .iter_mut()
+            .find_map(|(poll, _)| poll())
+    }
+
+    /// Wait until one of the events associated with this [`Selector`] has completed. If more than
+    /// one event has completed, a random event handler will be run and its return value produced.
+    pub fn wait(&mut self) -> T {
+        self.wait_inner()
+    }
+}
+
+impl<'a, T: 'a> Selector<'a, Option<T>> {
+    /// An iterator over incoming events on this [`Selector`].
+    pub fn iter(mut self) -> impl Iterator<Item=T> + 'a {
+        std::iter::from_fn(move || self.wait_inner())
     }
 }
 
