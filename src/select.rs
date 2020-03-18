@@ -25,6 +25,7 @@ pub struct Selector<'a, T> {
         Box<dyn FnMut() -> Option<T> + 'a>, // Poll
         Box<dyn FnMut() + 'a>, // Drop
     )>,
+    next_poll: usize,
     signal: Arc<SelectorSignal>,
 }
 
@@ -33,6 +34,7 @@ impl<'a, T> Selector<'a, T> {
     pub fn new() -> Self {
         Self {
             selections: Vec::new(),
+            next_poll: 0,
             signal: Arc::new(SelectorSignal {
                 wait_lock: Mutex::new(None),
                 trigger: Condvar::new(),
@@ -122,10 +124,13 @@ impl<'a, T> Selector<'a, T> {
     /// more than one event has completed, a random event handler will be run and its return value
     /// returned. If none of the events have completed a `None` is returned.
     pub fn poll(&mut self) -> Option<T> {
-        self
-            .selections
-            .iter_mut()
-            .find_map(|(poll, _)| poll())
+        for _ in 0..self.selections.len() {
+            if let Some(val) = (&mut self.selections[self.next_poll].0)() {
+                return Some(val);
+            }
+            self.next_poll = (((self.next_poll as u64 + 1) * self.selections.len() as u64) >> 32) as usize;
+        }
+        None
     }
 
     /// Wait until one of the events associated with this [`Selector`] has completed. If more than

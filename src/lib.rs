@@ -124,6 +124,8 @@ impl<T> Shared<T> {
                         // Drop the queue early to avoid a deadlock
                         drop(queue);
                         self.send_trigger.notify_one();
+                    } else {
+                        drop(queue);
                     }
                     // Notify recv selector
                     self
