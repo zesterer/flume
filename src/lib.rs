@@ -219,42 +219,52 @@ impl<T> Shared<T> {
         }
     }
 
+    fn poll_recv<S>(&self, on_success: S) -> Result<T, Option<(spin::MutexGuard<Queue<T>>, TryRecvError)>>
+        where S: FnOnce(&Self),
+    {
+        // Attempt to lock the queue. Upon success, attempt to receive. If the queue is empty,
+        // we don't block anyway so just break out of the loop.
+        if let Some(mut queue) = self.queue.try_lock() {
+            if let Some(msg) = queue.pop() {
+                on_success(self);
+                // If there are senders waiting for a message, wake them up.
+                if let Some(recv_trigger) = self.recv_trigger.as_ref() {
+                    if queue.1.is_some() && self.send_waiters.load(Ordering::Relaxed) > 0 {
+                        let _ = self.wait_lock.lock().unwrap();
+                        drop(queue);
+                        recv_trigger.notify_one();
+                    }
+                }
+                // Notify send selectors
+                self
+                    .send_selectors
+                    .lock()
+                    .1
+                    .iter()
+                    .for_each(|(_, signal, token)| {
+                        let mut guard = signal.wait_lock.lock().unwrap();
+                        *guard = Some(*token);
+                        signal.trigger.notify_one();
+                    });
+                Ok(msg)
+            } else if self.senders.load(Ordering::Relaxed) == 0 {
+                // If there's nothing more in the queue, this might be because there are no
+                // more senders.
+                Err(Some((queue, TryRecvError::Disconnected)))
+            } else {
+                Err(Some((queue, TryRecvError::Empty)))
+            }
+        } else {
+            Err(None)
+        }
+    }
+
     fn try_recv(&self) -> Result<T, (spin::MutexGuard<Queue<T>>, TryRecvError)> {
         loop {
-            // Attempt to lock the queue. Upon success, attempt to receive. If the queue is empty,
-            // we don't block anyway so just break out of the loop.
-            if let Some(mut queue) = self.queue.try_lock() {
-                break if let Some(msg) = queue.pop() {
-                    // If there are senders waiting for a message, wake them up.
-                    if let Some(recv_trigger) = self.recv_trigger.as_ref() {
-                        if queue.1.is_some() && self.send_waiters.load(Ordering::Relaxed) > 0 {
-                            let _ = self.wait_lock.lock().unwrap();
-                            drop(queue);
-                            recv_trigger.notify_one();
-                        }
-                    }
-                    // Notify send selectors
-                    self
-                        .send_selectors
-                        .lock()
-                        .1
-                        .iter()
-                        .for_each(|(_, signal, token)| {
-                            let mut guard = signal.wait_lock.lock().unwrap();
-                            *guard = Some(*token);
-                            signal.trigger.notify_one();
-                        });
-                    Ok(msg)
-                } else if self.senders.load(Ordering::Relaxed) == 0 {
-                    // If there's nothing more in the queue, this might be because there are no
-                    // more senders.
-                    Err((queue, TryRecvError::Disconnected))
-                } else {
-                    Err((queue, TryRecvError::Empty))
-                };
-            } else {
-                // If we can't gain access to the queue, yield until the next time slice
-                thread::yield_now();
+            match self.poll_recv(|_| {}) {
+                Ok(val) => break Ok(val),
+                Err(Some(tuple)) => break Err(tuple),
+                Err(None) => thread::yield_now(),
             }
         }
     }
@@ -270,13 +280,13 @@ impl<T> Shared<T> {
 
             // Take a guard of the main lock to use later when waiting
             let guard = self.wait_lock.lock().unwrap();
-            // Inform the receiver that we need waking
+            // Inform the sender that we need waking
             self.listen_mode.fetch_add(1, Ordering::Acquire);
             // We keep the queue alive until here to avoid a deadlock
             drop(queue);
             // Wait until we get a signal that the queue has new messages
             let _ = self.send_trigger.wait(guard).unwrap();
-            // Inform the receiver that we no longer need waking
+            // Inform the sender that we no longer need waking
             self.listen_mode.fetch_sub(1, Ordering::Release);
         }
     }
@@ -444,7 +454,7 @@ impl<T> Receiver<T> {
 
 #[cfg(feature = "async")]
 pub struct RecvFuture<'a, T> {
-    disconnected: bool,
+    set_as_waiting: bool,
     recv: &'a mut Receiver<T>,
 }
 
@@ -452,7 +462,7 @@ pub struct RecvFuture<'a, T> {
 impl<'a, T> RecvFuture<'a, T> {
     fn new(recv: &mut Receiver<T>) -> RecvFuture<T> {
         RecvFuture {
-            disconnected: false,
+            set_as_waiting: false,
             recv,
         }
     }
@@ -462,62 +472,34 @@ impl<'a, T> RecvFuture<'a, T> {
 impl<'a, T> Future for RecvFuture<'a, T> {
     type Output = Result<T, RecvError>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let recv = &self.recv;
+
         // Set the waker. Cannot be done in the constructor as context is not provided yet
         *recv.shared.waker.lock() = Some(cx.waker().clone());
 
-        // Attempt to gain exclusive access to the queue
-        if let Some(mut queue) = recv.shared.queue.try_lock() {
-            match queue.pop() {
-                // We've got the message we wanted
-                Some(msg) => {
-                    *recv.shared.waker.lock() = None;
-                    // Ensure the listen mode is reset
-                    // TODO: Are we performing more atomic stores than we need to here?
-                    recv.shared.listen_mode.store(1, Ordering::Release);
+        // On success, set the waker to none to avoid it being woken again in case that is wrong
+        let res = recv.shared.poll_recv(|shared| *shared.waker.lock() = None);
 
-                    // Notify senders
-                    if let Some(recv_trigger) = recv.shared.recv_trigger.as_ref() {
-                        if queue.1.is_some() && recv.shared.send_waiters.load(Ordering::Relaxed) > 0 {
-                            let _ = recv.shared.wait_lock.lock().unwrap();
-                            drop(queue);
-                            recv_trigger.notify_one();
-                        }
-                    }
-
-                    // Notify send selectors
-                    recv
-                        .shared
-                        .send_selectors
-                        .lock()
-                        .1
-                        .iter()
-                        .for_each(|(_, signal, token)| {
-                            let mut guard = signal.wait_lock.lock().unwrap();
-                            *guard = Some(*token);
-                            signal.trigger.notify_one();
-                        });
-
-                    return Poll::Ready(Ok(msg));
-                },
-                // No messages left, and there are no more senders, so our work here is done.
-                None if self.disconnected => { // TODO disconnected
-                    *recv.shared.waker.lock() = None;
-                    return Poll::Ready(Err(RecvError::Disconnected));
-                },
-                // Sleep when empty
-                None => {
-                    // Indicate to future senders that we'll need to be woken up
-                    recv.shared.listen_mode.store(2, Ordering::Relaxed);
-                },
+        let poll = match res {
+            Ok(msg) => Poll::Ready(Ok(msg)),
+            Err(Some((_guard, TryRecvError::Disconnected))) => Poll::Ready(Err(RecvError::Disconnected)),
+            Err(Some((_guard, TryRecvError::Empty))) => Poll::Pending,
+            Err(None) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
             }
-        } else {
-            cx.waker().wake_by_ref();
+        };
+
+        if poll.is_ready() && self.set_as_waiting {
+            // Inform the sender that we no longer need waking
+            self.recv.shared.listen_mode.fetch_sub(1, Ordering::Release);
+        } else if poll.is_pending() && !self.set_as_waiting {
+            // Inform the sender that we need waking
+            self.recv.shared.listen_mode.fetch_add(1, Ordering::Acquire);
         }
 
-        self.disconnected |= self.recv.shared.senders.load(Ordering::Relaxed) == 0;
-        Poll::Pending
+        poll
     }
 }
 
