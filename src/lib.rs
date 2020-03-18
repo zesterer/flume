@@ -111,13 +111,18 @@ impl<T> Shared<T> {
             // we don't block anyway so just break out of the loop.
             if let Some(mut queue) = self.queue.try_lock() {
                 let listen_mode = self.listen_mode.load(Ordering::Relaxed);
-                // If the listener has disconnected, the channel is dead
-                if listen_mode == 0 {
+                if listen_mode == 0 { // If the listener has disconnected, the channel is dead
                     break Err((queue, TrySendError::Disconnected(msg)));
                 } else {
                     // If pushing fails, it's because the queue is full
                     if let Some(msg) = queue.push(msg) {
                         break Err((queue, TrySendError::Full(msg)));
+                    } else if let Some((signal, token)) = &*self.recv_selector.lock() {
+                        // If there is a recv selector attached, notify that only.
+                        let mut guard = signal.wait_lock.lock().unwrap();
+                        drop(queue);
+                        *guard = Some(*token);
+                        signal.trigger.notify_one();
                     } else if listen_mode > 1 {
                         // Notify the receiver of a new message if listeners are waiting
                         let _ = self.wait_lock.lock().unwrap();
@@ -127,16 +132,6 @@ impl<T> Shared<T> {
                     } else {
                         drop(queue);
                     }
-                    // Notify recv selector
-                    self
-                        .recv_selector
-                        .lock()
-                        .as_ref()
-                        .map(|(signal, token)| {
-                            let mut guard = signal.wait_lock.lock().unwrap();
-                            *guard = Some(*token);
-                            signal.trigger.notify_one();
-                        });
                     break Ok(());
                 }
             } else {
