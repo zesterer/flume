@@ -12,7 +12,8 @@ readme = "README.md"
 
 [features]
 select = []
-default = ["select"]
+async = []
+default = ["select", "async"]
 
 [dependencies]
 spin = "0.5"
