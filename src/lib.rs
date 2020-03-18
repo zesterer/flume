@@ -86,8 +86,8 @@ struct Shared<T> {
     wait_lock: Mutex<()>,
     // Used for notifying the receiver about incoming messages.
     send_trigger: Condvar,
-    send_selectors: spin::RwLock<(usize, Vec<(usize, Arc<SelectorSignal>, Token)>)>,
-    recv_selector: spin::RwLock<Option<(Arc<SelectorSignal>, Token)>>,
+    send_selectors: spin::Mutex<(usize, Vec<(usize, Arc<SelectorSignal>, Token)>)>,
+    recv_selector: spin::Mutex<Option<(Arc<SelectorSignal>, Token)>>,
     // Used for notifying senders about the queue no longer being full. Therefore, this is only a
     // `Some` for bounded queues.
     recv_trigger: Option<Condvar>,
@@ -128,7 +128,7 @@ impl<T> Shared<T> {
                     // Notify recv selector
                     self
                         .recv_selector
-                        .read()
+                        .lock()
                         .as_ref()
                         .map(|(signal, token)| {
                             let mut guard = signal.wait_lock.lock().unwrap();
@@ -201,7 +201,7 @@ impl<T> Shared<T> {
                     // Notify send selectors
                     self
                         .send_selectors
-                        .read()
+                        .lock()
                         .1
                         .iter()
                         .for_each(|(_, signal, token)| {
@@ -290,22 +290,22 @@ impl<T> Shared<T> {
     }
 
     fn connect_send_selector(&self, signal: Arc<SelectorSignal>, token: Token) -> usize {
-        let (id, signals) = &mut *self.send_selectors.write();
+        let (id, signals) = &mut *self.send_selectors.lock();
         *id += 1;
         signals.push((*id, signal, token));
         *id
     }
 
     fn disconnect_send_selector(&self, id: usize) {
-        self.send_selectors.write().1.retain(|(s_id, _, _)| s_id != &id);
+        self.send_selectors.lock().1.retain(|(s_id, _, _)| s_id != &id);
     }
 
     fn connect_recv_selector(&self, signal: Arc<SelectorSignal>, token: Token) {
-        *self.recv_selector.write() = Some((signal, token))
+        *self.recv_selector.lock() = Some((signal, token))
     }
 
     fn disconnect_recv_selector(&self) {
-        *self.recv_selector.write() = None;
+        *self.recv_selector.lock() = None;
     }
 }
 
@@ -472,8 +472,8 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
         queue: spin::Mutex::new(Queue::new()),
         wait_lock: Mutex::new(()),
         send_trigger: Condvar::new(),
-        send_selectors: spin::RwLock::new((0, Vec::new())),
-        recv_selector: spin::RwLock::new(None),
+        send_selectors: spin::Mutex::new((0, Vec::new())),
+        recv_selector: spin::Mutex::new(None),
         recv_trigger: None,
         senders: AtomicUsize::new(1),
         send_waiters: AtomicUsize::new(0),
@@ -512,8 +512,8 @@ pub fn bounded<T>(n: usize) -> (Sender<T>, Receiver<T>) {
         queue: spin::Mutex::new(Queue::bounded(n)),
         wait_lock: Mutex::new(()),
         send_trigger: Condvar::new(),
-        send_selectors: spin::RwLock::new((0, Vec::new())),
-        recv_selector: spin::RwLock::new(None),
+        send_selectors: spin::Mutex::new((0, Vec::new())),
+        recv_selector: spin::Mutex::new(None),
         recv_trigger: Some(Condvar::new()),
         senders: AtomicUsize::new(1),
         send_waiters: AtomicUsize::new(0),
