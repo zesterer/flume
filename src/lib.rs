@@ -25,6 +25,7 @@ use std::{
     sync::{Arc, atomic::{AtomicUsize, Ordering}},
     time::{Duration, Instant},
     cell::UnsafeCell,
+    marker::PhantomData,
     thread,
 };
 use std::sync::{Condvar, Mutex};
@@ -66,6 +67,8 @@ impl<T> Queue<T> {
     fn new() -> Self { Self(VecDeque::new(), None) }
     fn bounded(n: usize) -> Self { Self(VecDeque::new(), Some(n)) }
 
+    fn len(&self) -> usize { self.0.len() }
+
     fn push(&mut self, x: T) -> Option<T> {
         if Some(self.0.len()) == self.1 {
             Some(x)
@@ -77,6 +80,10 @@ impl<T> Queue<T> {
 
     fn pop(&mut self) -> Option<T> {
         self.0.pop_front()
+    }
+
+    fn take(&mut self) -> Self {
+        std::mem::replace(self, Queue(VecDeque::new(), self.1))
     }
 }
 
@@ -178,6 +185,17 @@ impl<T> Shared<T> {
         if let Some(recv_trigger) = self.recv_trigger.as_ref() {
             let _ = self.wait_lock.lock().unwrap();
             recv_trigger.notify_all();
+        }
+    }
+
+    fn take_remaining(&self) -> Queue<T> {
+        loop {
+            if let Some(mut queue) = self.queue.try_lock() {
+                break queue.take();
+            } else {
+                // If we can't gain access to the queue, yield until the next time slice
+                thread::yield_now();
+            }
         }
     }
 
@@ -380,14 +398,21 @@ impl<T> Receiver<T> {
 
     /// A blocking iterator over the values received on the channel that finishes iteration when
     /// all receivers of the channel have been dropped.
-    pub fn iter(&self) -> impl Iterator<Item=T> + '_ {
+    pub fn iter(&self) -> Iter<T> {
         Iter { receiver: &self }
     }
 
     /// A non-blocking iterator over the values received on the channel that finishes iteration
     /// when all receivers of the channel have been dropped or the channel is empty.
-    pub fn try_iter(&self) -> impl Iterator<Item=T> + '_ {
+    pub fn try_iter(&self) -> TryIter<T> {
         TryIter { receiver: &self }
+    }
+
+    /// Take all items currently sitting in the channel and produce an iterator over them. Unlike
+    /// [`try_iter`], the iterator will not attempt to fetch any more values from the channel after
+    /// creation.
+    pub fn drain(&self) -> Drain<T> {
+        Drain { queue: self.shared.take_remaining(), _phantom: PhantomData }
     }
 }
 
@@ -434,6 +459,29 @@ impl<'a, T> Iterator for TryIter<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.receiver.shared.try_recv().ok()
+    }
+}
+
+/// An fixed-sized iterator over the items drained from a channel.
+pub struct Drain<'a, T> {
+    queue: Queue<T>,
+    /// A phantom field used to constrain the lifetime of this iterator. We do this because the
+    /// implementation may change and we don't want to unintentionally constrain it. Removing this
+    /// lifetime later is a possibility.
+    _phantom: PhantomData<&'a ()>,
+}
+
+impl<'a, T> Iterator for Drain<'a, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.queue.pop()
+    }
+}
+
+impl<'a, T> ExactSizeIterator for Drain<'a, T> {
+    fn len(&self) -> usize {
+        self.queue.len()
     }
 }
 

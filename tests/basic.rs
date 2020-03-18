@@ -86,6 +86,17 @@ fn disconnect_rx() {
 }
 
 #[test]
+fn drain() {
+    let (tx, rx) = unbounded();
+
+    for i in 0..100 {
+        tx.send(i).unwrap();
+    }
+
+    assert_eq!(rx.drain().sum::<u32>(), (0..100).sum());
+}
+
+#[test]
 fn try_send() {
     let (tx, rx) = bounded(5);
 
