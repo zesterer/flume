@@ -276,7 +276,7 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn try_recv(&self, success: impl FnOnce(&mut Inner<T>)) -> Result<T, (spin::MutexGuard<Inner<T>>, TryRecvError)> {
+    fn try_recv(&self) -> Result<T, (spin::MutexGuard<Inner<T>>, TryRecvError)> {
         self.with_inner(|mut inner| {
             let msg = match inner.queue.pop() {
                 Some(msg) => msg,
@@ -285,8 +285,6 @@ impl<T> Shared<T> {
                     return Err((inner, TryRecvError::Disconnected)),
                 None => return Err((inner, TryRecvError::Empty)),
             };
-
-            success(&mut inner);
 
             #[cfg(feature = "select")]
             {
@@ -318,7 +316,7 @@ impl<T> Shared<T> {
     fn recv(&self) -> Result<T, RecvError> {
         loop {
             // Attempt to receive a message
-            let mut inner = match self.try_recv(|_| {}) {
+            let mut inner = match self.try_recv() {
                 Ok(msg) => break Ok(msg),
                 Err((_, TryRecvError::Disconnected)) => break Err(RecvError::Disconnected),
                 Err((queue, TryRecvError::Empty)) => queue,
@@ -341,7 +339,7 @@ impl<T> Shared<T> {
     #[inline]
     fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
         // Attempt a speculative recv. If we are lucky there might be a message in the queue!
-        if let Ok(msg) = self.try_recv(|_| {}) {
+        if let Ok(msg) = self.try_recv() {
             return Ok(msg);
         }
 
@@ -371,7 +369,7 @@ impl<T> Shared<T> {
             }
 
             // Attempt to receive a message from the queue
-            match self.try_recv(|_| {}) {
+            match self.try_recv() {
                 Ok(msg) => break Ok(msg),
                 Err((_, TryRecvError::Empty)) => {},
                 Err((_, TryRecvError::Disconnected)) => break Err(RecvTimeoutError::Disconnected),
@@ -493,7 +491,7 @@ impl<T> Receiver<T> {
     /// Attempt to fetch an incoming value from the channel associated with this receiver,
     /// returning an error if the channel is empty or all channel senders have been dropped.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.shared.try_recv(|_| {}).map_err(|(_, err)| err)
+        self.shared.try_recv().map_err(|(_, err)| err)
     }
 
     /// A blocking iterator over the values received on the channel that finishes iteration when
@@ -554,7 +552,7 @@ impl<'a, T> Iterator for TryIter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.receiver.shared.try_recv(|_| {}).ok()
+        self.receiver.shared.try_recv().ok()
     }
 }
 

@@ -9,16 +9,12 @@ use crate::*;
 
 /// A future  used to receive a value from the channel.
 pub struct RecvFuture<'a, T> {
-    set_as_waiting: bool,
     recv: &'a mut Receiver<T>,
 }
 
 impl<'a, T> RecvFuture<'a, T> {
     pub(crate) fn new(recv: &mut Receiver<T>) -> RecvFuture<T> {
-        RecvFuture {
-            set_as_waiting: false,
-            recv,
-        }
+        RecvFuture { recv }
     }
 }
 
@@ -31,26 +27,25 @@ impl<'a, T> Future for RecvFuture<'a, T> {
 
         // On success, set the waker to none to avoid it being woken again in case that is wrong
         // TODO: `poll_recv` instead to prevent even spinning?
-        let res = self.recv.shared.try_recv(|mut inner| inner.recv_waker = None);
+        let res = self.recv.shared.try_recv();
 
         let poll = match res {
-            Ok(msg) => Poll::Ready(Ok(msg)),
+            Ok(msg) => {
+                self.recv.shared.with_inner(|mut inner| {
+                    // Detach the waker
+                    inner.recv_waker = None;
+                    // Inform the sender that we need waking
+                    inner.listen_mode -= 1;
+                });
+                Poll::Ready(Ok(msg))
+            },
             Err((_guard, TryRecvError::Disconnected)) => Poll::Ready(Err(RecvError::Disconnected)),
-            Err((_guard, TryRecvError::Empty)) => Poll::Pending,
-            // TODO: Uhhh should we have this?
-            /*Err(None) => {
-                //cx.waker().wake_by_ref();
+            Err((mut inner, TryRecvError::Empty)) => {
+                // Inform the sender that we no longer need waking
+                inner.listen_mode += 1;
                 Poll::Pending
-            }*/
+            },
         };
-
-        if poll.is_ready() && self.set_as_waiting {
-            // Inform the sender that we no longer need waking
-            self.recv.shared.with_inner(|mut inner| inner.listen_mode -= 1);
-        } else if poll.is_pending() && !self.set_as_waiting {
-            // Inform the sender that we need waking
-            self.recv.shared.with_inner(|mut inner| inner.listen_mode += 1);
-        }
 
         poll
     }
