@@ -1,6 +1,6 @@
 # Flume
 
-A blazingly fast multi-producer, single-consumer channel (now with `select` support!).
+A blazingly fast multi-producer, single-consumer channel.
 
 [![Cargo](https://img.shields.io/crates/v/flume.svg)](
 https://crates.io/crates/flume)
@@ -28,11 +28,11 @@ assert_eq!((0..10).sum(), received);
 ## Features
 
 - Bounded/unbounded queues
-- Senders implement `Send` and may be cloned
 - No unsafe code
 - Simple design, few dependencies, very fast to compile
+- `async` support
+- `select`-like interface (see [examples/select.rs](examples/select.rs))
 - Feature parity with `std::sync::mpsc`
-- Support for a `select` interface (see [examples/select.rs])
 
 ## Usage
 
