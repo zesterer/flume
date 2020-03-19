@@ -15,6 +15,8 @@
 
 #[cfg(feature = "select")]
 pub mod select;
+#[cfg(feature = "async")]
+pub mod r#async;
 
 // Reexports
 #[cfg(feature = "select")]
@@ -22,19 +24,18 @@ pub use select::Selector;
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, atomic::{AtomicUsize, Ordering}},
+    sync::{Arc, Condvar, Mutex, atomic::{AtomicUsize, Ordering}},
     time::{Duration, Instant},
     cell::UnsafeCell,
     marker::PhantomData,
     thread,
 };
-use std::sync::{Condvar, Mutex};
 #[cfg(feature = "async")]
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll, Waker},
-};
+use std::task::Waker;
+#[cfg(feature = "select")]
+use crate::select::{Token, SelectorSignal};
+#[cfg(feature = "async")]
+use crate::r#async::RecvFuture;
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -97,11 +98,16 @@ struct Shared<T> {
     queue: spin::Mutex<Queue<T>>,
     /// Mutexed used for locking condvars.
     wait_lock: Mutex<()>,
-    // Used for notifying the receiver about incoming messages.
+    /// Used for notifying the receiver about incoming messages.
     send_trigger: Condvar,
+    /// Async waker, used for waking async receiver tasks
     #[cfg(feature = "async")]
-    waker: spin::Mutex<Option<Waker>>,
+    recv_waker: spin::Mutex<Option<Waker>>,
+    /// Selectors waiting to send on this mpsc
+    #[cfg(feature = "select")]
     send_selectors: spin::Mutex<(usize, Vec<(usize, Arc<SelectorSignal>, Token)>)>,
+    /// Selector waiting to receive on this mpsc
+    #[cfg(feature = "select")]
     recv_selector: spin::Mutex<Option<(Arc<SelectorSignal>, Token)>>,
     // Used for notifying senders about the queue no longer being full. Therefore, this is only a
     // `Some` for bounded queues.
@@ -119,6 +125,26 @@ struct Shared<T> {
     listen_mode: AtomicUsize,
 }
 
+impl<T> Default for Shared<T> {
+    fn default() -> Self {
+        Self {
+            queue: spin::Mutex::new(Queue::new()),
+            wait_lock: Mutex::new(()),
+            send_trigger: Condvar::new(),
+            #[cfg(feature = "async")]
+            recv_waker: spin::Mutex::new(None),
+            #[cfg(feature = "select")]
+            send_selectors: spin::Mutex::new((0, Vec::new())),
+            #[cfg(feature = "select")]
+            recv_selector: spin::Mutex::new(None),
+            recv_trigger: None,
+            senders: AtomicUsize::new(1),
+            send_waiters: AtomicUsize::new(0),
+            listen_mode: AtomicUsize::new(1),
+        }
+    }
+}
+
 impl<T> Shared<T> {
     fn try_send(&self, msg: T) -> Result<(), (spin::MutexGuard<Queue<T>>, TrySendError<T>)> {
         loop {
@@ -132,22 +158,31 @@ impl<T> Shared<T> {
                     // If pushing fails, it's because the queue is full
                     if let Some(msg) = queue.push(msg) {
                         break Err((queue, TrySendError::Full(msg)));
-                    } else if let Some((signal, token)) = &*self.recv_selector.lock() {
-                        // If there is a recv selector attached, notify that only.
-                        let mut guard = signal.wait_lock.lock().unwrap();
-                        drop(queue);
-                        *guard = Some(*token);
-                        signal.trigger.notify_one();
-                    } else if listen_mode > 1 {
-                        // Notify the receiver of a new message if listeners are waiting
+                    }
+
+                    #[cfg(feature = "select")]
+                    {
+                        // Notify the receiving selector
+                        if let Some((signal, token)) = &*self.recv_selector.lock() {
+                            let mut guard = signal.wait_lock.lock().unwrap();
+                            drop(queue); // Avoid a deadlock
+                            *guard = Some(*token);
+                            signal.trigger.notify_one();
+                            break Ok(());
+                        }
+                    }
+
+                    // Notify the receiver of a new message, but only if it is waiting
+                    if listen_mode > 1 {
                         let _ = self.wait_lock.lock().unwrap();
-                        // Drop the queue early to avoid a deadlock
-                        drop(queue);
+                        drop(queue); // Avoid a deadlock
                         self.send_trigger.notify_one();
+
                         #[cfg(feature = "async")]
                         {
-                            if let Some(waker) = &*self.waker.lock() {
-                                waker.wake_by_ref();
+                            // Notify the receiving async task
+                            if let Some(recv_waker) = &*self.recv_waker.lock() {
+                                recv_waker.wake_by_ref();
                             }
                         }
                     } else {
@@ -195,8 +230,8 @@ impl<T> Shared<T> {
         self.send_trigger.notify_all(); // TODO: notify_one instead? Which is faster?
         #[cfg(feature = "async")]
         {
-            if let Some(waker) = &*self.waker.lock() {
-                waker.wake_by_ref();
+            if let Some(recv_waker) = &*self.recv_waker.lock() {
+                recv_waker.wake_by_ref();
             }
         }
     }
@@ -235,17 +270,20 @@ impl<T> Shared<T> {
                         recv_trigger.notify_one();
                     }
                 }
-                // Notify send selectors
-                self
-                    .send_selectors
-                    .lock()
-                    .1
-                    .iter()
-                    .for_each(|(_, signal, token)| {
-                        let mut guard = signal.wait_lock.lock().unwrap();
-                        *guard = Some(*token);
-                        signal.trigger.notify_one();
-                    });
+                #[cfg(feature = "select")]
+                {
+                    // Notify send selectors
+                    self
+                        .send_selectors
+                        .lock()
+                        .1
+                        .iter()
+                        .for_each(|(_, signal, token)| {
+                            let mut guard = signal.wait_lock.lock().unwrap();
+                            *guard = Some(*token);
+                            signal.trigger.notify_one();
+                        });
+                }
                 Ok(msg)
             } else if self.senders.load(Ordering::Relaxed) == 0 {
                 // If there's nothing more in the queue, this might be because there are no
@@ -334,6 +372,7 @@ impl<T> Shared<T> {
         result
     }
 
+    #[cfg(feature = "select")]
     fn connect_send_selector(&self, signal: Arc<SelectorSignal>, token: Token) -> usize {
         let (id, signals) = &mut *self.send_selectors.lock();
         *id += 1;
@@ -341,14 +380,17 @@ impl<T> Shared<T> {
         *id
     }
 
+    #[cfg(feature = "select")]
     fn disconnect_send_selector(&self, id: usize) {
         self.send_selectors.lock().1.retain(|(s_id, _, _)| s_id != &id);
     }
 
+    #[cfg(feature = "select")]
     fn connect_recv_selector(&self, signal: Arc<SelectorSignal>, token: Token) {
         *self.recv_selector.lock() = Some((signal, token))
     }
 
+    #[cfg(feature = "select")]
     fn disconnect_recv_selector(&self) {
         *self.recv_selector.lock() = None;
     }
@@ -421,6 +463,7 @@ impl<T> Receiver<T> {
     }
 
     // TODO(async): doc
+    // Takes `&mut self` to avoid >1 task waiting on this channel
     #[cfg(feature = "async")]
     pub fn recv_async(&mut self) -> RecvFuture<T> {
         RecvFuture::new(self)
@@ -449,57 +492,6 @@ impl<T> Receiver<T> {
     /// creation.
     pub fn drain(&self) -> Drain<T> {
         Drain { queue: self.shared.take_remaining(), _phantom: PhantomData }
-    }
-}
-
-#[cfg(feature = "async")]
-pub struct RecvFuture<'a, T> {
-    set_as_waiting: bool,
-    recv: &'a mut Receiver<T>,
-}
-
-#[cfg(feature = "async")]
-impl<'a, T> RecvFuture<'a, T> {
-    fn new(recv: &mut Receiver<T>) -> RecvFuture<T> {
-        RecvFuture {
-            set_as_waiting: false,
-            recv,
-        }
-    }
-}
-
-#[cfg(feature = "async")]
-impl<'a, T> Future for RecvFuture<'a, T> {
-    type Output = Result<T, RecvError>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let recv = &self.recv;
-
-        // Set the waker. Cannot be done in the constructor as context is not provided yet
-        *recv.shared.waker.lock() = Some(cx.waker().clone());
-
-        // On success, set the waker to none to avoid it being woken again in case that is wrong
-        let res = recv.shared.poll_recv(|shared| *shared.waker.lock() = None);
-
-        let poll = match res {
-            Ok(msg) => Poll::Ready(Ok(msg)),
-            Err(Some((_guard, TryRecvError::Disconnected))) => Poll::Ready(Err(RecvError::Disconnected)),
-            Err(Some((_guard, TryRecvError::Empty))) => Poll::Pending,
-            Err(None) => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        };
-
-        if poll.is_ready() && self.set_as_waiting {
-            // Inform the sender that we no longer need waking
-            self.recv.shared.listen_mode.fetch_sub(1, Ordering::Release);
-        } else if poll.is_pending() && !self.set_as_waiting {
-            // Inform the sender that we need waking
-            self.recv.shared.listen_mode.fetch_add(1, Ordering::Acquire);
-        }
-
-        poll
     }
 }
 
@@ -602,16 +594,7 @@ impl<T> Iterator for IntoIter<T> {
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         queue: spin::Mutex::new(Queue::new()),
-        wait_lock: Mutex::new(()),
-        send_trigger: Condvar::new(),
-        #[cfg(feature = "async")]
-        waker: spin::Mutex::new(None),
-        send_selectors: spin::Mutex::new((0, Vec::new())),
-        recv_selector: spin::Mutex::new(None),
-        recv_trigger: None,
-        senders: AtomicUsize::new(1),
-        send_waiters: AtomicUsize::new(0),
-        listen_mode: AtomicUsize::new(1),
+        ..Shared::default()
     });
     (
         Sender { shared: shared.clone() },
@@ -644,29 +627,10 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 pub fn bounded<T>(n: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         queue: spin::Mutex::new(Queue::bounded(n)),
-        wait_lock: Mutex::new(()),
-        send_trigger: Condvar::new(),
-        #[cfg(feature = "async")]
-        waker: spin::Mutex::new(None),
-        send_selectors: spin::Mutex::new((0, Vec::new())),
-        recv_selector: spin::Mutex::new(None),
-        recv_trigger: Some(Condvar::new()),
-        senders: AtomicUsize::new(1),
-        send_waiters: AtomicUsize::new(0),
-        listen_mode: AtomicUsize::new(1),
+        ..Shared::default()
     });
     (
         Sender { shared: shared.clone() },
         Receiver { shared, _phantom_cell: UnsafeCell::new(()) },
     )
-}
-
-// A unique token corresponding to an event in a selector
-type Token = usize;
-
-// Used to signal to selectors that an event is ready
-struct SelectorSignal {
-    wait_lock: Mutex<Option<usize>>,
-    trigger: Condvar,
-    //listeners: AtomicUsize,
 }

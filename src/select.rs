@@ -1,5 +1,15 @@
 use crate::*;
 
+// A unique token corresponding to an event in a selector
+pub(crate) type Token = usize;
+
+// Used to signal to selectors that an event is ready
+pub(crate) struct SelectorSignal {
+    pub(crate) wait_lock: Mutex<Option<usize>>,
+    pub(crate) trigger: Condvar,
+    //listeners: AtomicUsize,
+}
+
 /// A type used to wait upon multiple blocking operations at once.
 ///
 /// A [`Selector`] implements [`select`](https://en.wikipedia.org/wiki/Select_(Unix))-like behaviour,

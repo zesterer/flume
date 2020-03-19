@@ -21,6 +21,7 @@ spin = "0.5"
 [dev-dependencies]
 crossbeam-channel = "0.4"
 criterion = "0.2"
+async-std = "1.5"
 
 [[bench]]
 name = "basic"

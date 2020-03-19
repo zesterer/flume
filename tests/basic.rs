@@ -149,7 +149,6 @@ fn rendezvous() {
 
     let t = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(250));
-
         rx.recv().unwrap();
     });
 
@@ -270,6 +269,24 @@ fn select() {
         .send(&tx0, Foo(43), |x| x)
         .wait()
         .unwrap();
+
+    t.join().unwrap();
+}
+
+
+#[cfg(feature = "async")]
+#[test]
+fn r#async() {
+    let (tx, mut rx) = unbounded();
+
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        tx.send(42u32).unwrap();
+    });
+
+    async_std::task::block_on(async {
+        assert_eq!(rx.recv_async().await.unwrap(), 42);
+    });
 
     t.join().unwrap();
 }
