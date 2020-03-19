@@ -1,3 +1,5 @@
+//! Types that permit waiting upon multiple blocking operations using the [`Selector`] interface.
+
 use crate::*;
 
 // A unique token corresponding to an event in a selector
@@ -53,7 +55,7 @@ impl<'a, T> Selector<'a, T> {
         }
     }
 
-    /// Add a send operation to the selector.
+    /// Add a send operation to the selector that sends the provided value.
     ///
     /// Once added, the selector can be used to run the provided handler function on completion of
     /// this operation.
