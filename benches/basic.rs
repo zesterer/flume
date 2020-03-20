@@ -263,6 +263,12 @@ fn hydra_32t_1000m(b: &mut Criterion) {
     b.bench_function("hydra-32t-1000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 32, 1000));
 }
 
+fn hydra_256t_1m(b: &mut Criterion) {
+    b.bench_function("hydra-256t-1m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 256, 1));
+    b.bench_function("hydra-256t-1m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 256, 1));
+    b.bench_function("hydra-256t-1m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 256, 1));
+}
+
 fn hydra_1t_1000m(b: &mut Criterion) {
     b.bench_function("hydra-1t-1000m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 1, 1000));
     b.bench_function("hydra-1t-1000m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 1, 1000));
@@ -306,6 +312,7 @@ criterion_group!(
     inout,
     hydra_32t_1m,
     hydra_32t_1000m,
+    hydra_256t_1m,
     hydra_1t_1000m,
     hydra_4t_10000m,
     robin_u_32t_1m,
