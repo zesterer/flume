@@ -13,12 +13,11 @@ readme = "README.md"
 [features]
 select = []
 async = []
-receiver_buffer = ["arraydeque"]
+receiver_buffer = []
 default = ["select", "async", "receiver_buffer"]
 
 [dependencies]
 spin = "0.5"
-arraydeque = { version = "0.4", optional = true }
 
 [dev-dependencies]
 crossbeam-channel = "0.4"

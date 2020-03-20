@@ -245,6 +245,7 @@ fn select() {
         });
     }
 
+
     let x = Selector::new()
         .recv(&rx0, |x| x)
         .recv(&rx1, |x| x)
@@ -263,6 +264,7 @@ fn select() {
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(rx0.recv().unwrap(), Foo(42));
         assert_eq!(rx0.recv().unwrap(), Foo(43));
+
     });
 
     Selector::new()

@@ -37,8 +37,6 @@ use crate::select::{Token, SelectorSignal};
 #[cfg(feature = "async")]
 use crate::r#async::RecvFuture;
 #[cfg(feature = "receiver_buffer")]
-use arraydeque::ArrayDeque;
-#[cfg(feature = "receiver_buffer")]
 use std::cell::RefCell;
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
@@ -92,6 +90,10 @@ impl<T> Queue<T> {
 
     fn pop(&mut self) -> Option<T> {
         self.0.pop_front()
+    }
+
+    fn swap(&mut self, buf: &mut VecDeque<T>) {
+        std::mem::swap(&mut self.0, buf);
     }
 
     fn take(&mut self) -> Self {
@@ -234,21 +236,13 @@ impl<T> Shared<T> {
     fn send(&self, mut msg: T) -> Result<(), SendError<T>> {
         loop {
             // Attempt to send a message
-            let mut i = 0;
-            let mut inner = loop {
-                match self.try_send(msg) {
-                    Ok(()) => return Ok(()),
-                    Err((_, TrySendError::Disconnected(msg))) => return Err(SendError(msg)),
-                    Err((inner, TrySendError::Full(m))) => {
-                        msg = m;
-                        if i == 3 || inner.sender_count > 1 { // Optimisation
-                            break inner;
-                        } else {
-                            thread::yield_now();
-                        }
-                    },
-                };
-                i += 1;
+            let mut inner = match self.try_send(msg) {
+                Ok(()) => return Ok(()),
+                Err((_, TrySendError::Disconnected(msg))) => return Err(SendError(msg)),
+                Err((inner, TrySendError::Full(m))) => {
+                    msg = m;
+                    inner
+                },
             };
 
             if let Some(recv_trigger) = self.recv_trigger.as_ref() {
@@ -296,7 +290,7 @@ impl<T> Shared<T> {
     fn try_recv(
         &self,
         #[cfg(feature = "receiver_buffer")]
-        buf: &mut Buffer<T>,
+        buf: &mut VecDeque<T>,
     ) -> Result<T, (spin::MutexGuard<Inner<T>>, TryRecvError)> {
         #[cfg(feature = "receiver_buffer")]
         {
@@ -315,11 +309,8 @@ impl<T> Shared<T> {
             };
 
             #[cfg(feature = "receiver_buffer")]
-            for _ in 0..(BUFFER_SIZE - buf.len()) {
-                match inner.queue.pop() {
-                    Some(msg) => buf.push_back(msg).unwrap(), // TODO don't panic
-                    None => break,
-                }
+            {
+                inner.queue.swap(buf);
             }
 
             #[cfg(feature = "select")]
@@ -352,7 +343,7 @@ impl<T> Shared<T> {
     fn recv(
         &self,
         #[cfg(feature = "receiver_buffer")]
-        buf: &mut Buffer<T>,
+        buf: &mut VecDeque<T>,
     ) -> Result<T, RecvError> {
         loop {
             // Attempt to receive a message
@@ -387,7 +378,7 @@ impl<T> Shared<T> {
         &self,
         deadline: Instant,
         #[cfg(feature = "receiver_buffer")]
-        buf: &mut Buffer<T>,
+        buf: &mut VecDeque<T>,
     ) -> Result<T, RecvTimeoutError> {
         // Attempt a speculative recv. If we are lucky there might be a message in the queue!
         if let Ok(msg) = self.try_recv(#[cfg(feature = "receiver_buffer")] buf) {
@@ -503,17 +494,12 @@ impl<T> Drop for Sender<T> {
     }
 }
 
-#[cfg(feature = "receiver_buffer")]
-const BUFFER_SIZE: usize = 32;
-#[cfg(feature = "receiver_buffer")]
-type Buffer<T> = ArrayDeque<[T; BUFFER_SIZE], arraydeque::Saturating>;
-
 /// The receiving end of a channel.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
     /// Buffer for messages
     #[cfg(feature = "receiver_buffer")]
-    buffer: RefCell<Buffer<T>>,
+    buffer: RefCell<VecDeque<T>>,
     /// Used to prevent Sync being implemented for this type - we never actually use it!
     /// TODO: impl<T> !Sync for Receiver<T> {} when negative traits are stable
     _phantom_cell: UnsafeCell<()>,
@@ -684,7 +670,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
         Receiver {
             shared,
             #[cfg(feature = "receiver_buffer")]
-            buffer: RefCell::new(ArrayDeque::new()),
+            buffer: RefCell::new(VecDeque::new()),
             _phantom_cell: UnsafeCell::new(())
         },
     )
@@ -719,7 +705,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
         Receiver {
             shared,
             #[cfg(feature = "receiver_buffer")]
-            buffer: RefCell::new(ArrayDeque::new()),
+            buffer: RefCell::new(VecDeque::new()),
             _phantom_cell: UnsafeCell::new(())
         },
     )
