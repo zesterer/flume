@@ -348,10 +348,16 @@ impl<T> Shared<T> {
     ) -> Result<T, RecvError> {
         loop {
             // Attempt to receive a message
-            let mut inner = match self.try_recv(#[cfg(feature = "receiver_buffer")] buf) {
-                Ok(msg) => break Ok(msg),
-                Err((_, TryRecvError::Disconnected)) => break Err(RecvError::Disconnected),
-                Err((queue, TryRecvError::Empty)) => queue,
+            let mut i = 0;
+            let mut inner = loop {
+                match self.try_recv(#[cfg(feature = "receiver_buffer")] buf) {
+                    Ok(msg) => return Ok(msg),
+                    Err((_, TryRecvError::Disconnected)) => return Err(RecvError::Disconnected),
+                    Err((queue, TryRecvError::Empty)) if i == 3 => break queue,
+                    Err((queue, TryRecvError::Empty)) => {},
+                };
+                thread::yield_now();
+                i += 1;
             };
 
             // Take a guard of the main lock to use later when waiting
