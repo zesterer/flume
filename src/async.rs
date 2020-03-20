@@ -27,28 +27,26 @@ impl<'a, T> Future for RecvFuture<'a, T> {
         let mut buf = self.recv.buffer.borrow_mut();
 
         let res = if let Some(msg) = buf.pop_front() {
-            Some(Ok(msg))
+            return Poll::Ready(Ok(msg));
         } else {
             self
                 .recv
                 .shared
                 .poll_inner()
-                .map(|inner| self
+                .map(|mut inner| self
                     .recv
                     .shared
-                    .try_recv(move || inner, &mut buf))
+                    .try_recv(move || {
+                        // Detach the waker
+                        inner.recv_waker = None;
+                        // Inform the sender that we no longer need waking
+                        inner.listen_mode = 1;
+                        inner
+                    }, &mut buf))
         };
 
         let poll = match res {
-            Some(Ok(msg)) => {
-                self.recv.shared.with_inner(|mut inner| {
-                    // Detach the waker
-                    inner.recv_waker = None;
-                    // Inform the sender that we no longer need waking
-                    inner.listen_mode = 1;
-                });
-                Poll::Ready(Ok(msg))
-            },
+            Some(Ok(msg)) => Poll::Ready(Ok(msg)),
             Some(Err((_, TryRecvError::Disconnected))) => Poll::Ready(Err(RecvError::Disconnected)),
             Some(Err((mut inner, TryRecvError::Empty))) => {
                 // Inform the sender that we need waking

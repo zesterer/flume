@@ -120,6 +120,18 @@ fn try_send() {
 fn send_bounded() {
     let (tx, rx) = bounded(5);
 
+    for _ in 0..5 {
+        tx.send(42).unwrap();
+    }
+
+    let _ = rx.recv().unwrap();
+
+    tx.send(42).unwrap();
+
+    assert!(tx.try_send(42).is_err());
+
+    rx.drain();
+
     let mut ts = Vec::new();
     for _ in 0..100 {
         let tx = tx.clone();

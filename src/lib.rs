@@ -91,7 +91,12 @@ impl<T> Queue<T> {
     }
 
     fn swap(&mut self, buf: &mut VecDeque<T>) {
-        std::mem::swap(&mut self.0, buf);
+        // TODO: Swapping on bounded queues doesn't work correctly since it gives senders a false
+        // impression of how many items are in the queue, allowing them to push too many items into
+        // the queue
+        if !self.is_bounded() {
+            std::mem::swap(&mut self.0, buf);
+        }
     }
 
     fn take(&mut self) -> Self {
