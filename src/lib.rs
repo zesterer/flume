@@ -234,13 +234,21 @@ impl<T> Shared<T> {
     fn send(&self, mut msg: T) -> Result<(), SendError<T>> {
         loop {
             // Attempt to send a message
-            let mut inner = match self.try_send(msg) {
-                Ok(()) => break Ok(()),
-                Err((_, TrySendError::Disconnected(msg))) => break Err(SendError(msg)),
-                Err((inner, TrySendError::Full(m))) => {
-                    msg = m;
-                    inner
-                },
+            let mut i = 0;
+            let mut inner = loop {
+                match self.try_send(msg) {
+                    Ok(()) => return Ok(()),
+                    Err((_, TrySendError::Disconnected(msg))) => return Err(SendError(msg)),
+                    Err((inner, TrySendError::Full(m))) => {
+                        msg = m;
+                        if i == 3 || inner.sender_count > 1 { // Optimisation
+                            break inner;
+                        } else {
+                            thread::yield_now();
+                        }
+                    },
+                };
+                i += 1;
             };
 
             if let Some(recv_trigger) = self.recv_trigger.as_ref() {
@@ -353,8 +361,8 @@ impl<T> Shared<T> {
                 match self.try_recv(#[cfg(feature = "receiver_buffer")] buf) {
                     Ok(msg) => return Ok(msg),
                     Err((_, TryRecvError::Disconnected)) => return Err(RecvError::Disconnected),
-                    Err((queue, TryRecvError::Empty)) if i == 3 => break queue,
-                    Err((queue, TryRecvError::Empty)) => {},
+                    Err((inner, TryRecvError::Empty)) if i == 3 => break inner,
+                    Err((inner, TryRecvError::Empty)) => {},
                 };
                 thread::yield_now();
                 i += 1;
