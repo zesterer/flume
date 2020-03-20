@@ -13,8 +13,7 @@ readme = "README.md"
 [features]
 select = []
 async = []
-receiver_buffer = []
-default = ["select", "async", "receiver_buffer"]
+default = ["select", "async"]
 
 [dependencies]
 spin = "0.5"

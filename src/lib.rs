@@ -26,7 +26,7 @@ use std::{
     collections::VecDeque,
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
-    cell::UnsafeCell,
+    cell::{UnsafeCell, RefCell},
     marker::PhantomData,
     thread,
 };
@@ -36,8 +36,6 @@ use std::task::Waker;
 use crate::select::{Token, SelectorSignal};
 #[cfg(feature = "async")]
 use crate::r#async::RecvFuture;
-#[cfg(feature = "receiver_buffer")]
-use std::cell::RefCell;
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -310,14 +308,11 @@ impl<T> Shared<T> {
     fn try_recv<'a>(
         &'a self,
         take_inner: impl FnOnce() -> spin::MutexGuard<'a, Inner<T>>,
-        #[cfg(feature = "receiver_buffer")]
         buf: &mut VecDeque<T>,
     ) -> Result<T, (spin::MutexGuard<Inner<T>>, TryRecvError)> {
-        #[cfg(feature = "receiver_buffer")]
-        {
-            if let Some(msg) = buf.pop_front() {
-                return Ok(msg)
-            }
+        // Eagerly check the buffer
+        if let Some(msg) = buf.pop_front() {
+            return Ok(msg)
         }
 
         let mut inner = take_inner();
@@ -330,10 +325,8 @@ impl<T> Shared<T> {
             None => return Err((inner, TryRecvError::Empty)),
         };
 
-        #[cfg(feature = "receiver_buffer")]
-        {
-            inner.queue.swap(buf);
-        }
+        // Swap the buffers to grab the messages
+        inner.queue.swap(buf);
 
         #[cfg(feature = "select")]
         {
@@ -363,14 +356,13 @@ impl<T> Shared<T> {
     #[inline]
     fn recv(
         &self,
-        #[cfg(feature = "receiver_buffer")]
         buf: &mut VecDeque<T>,
     ) -> Result<T, RecvError> {
         loop {
             // Attempt to receive a message
             let mut i = 0;
             let mut inner = loop {
-                match self.try_recv(|| self.wait_inner(), #[cfg(feature = "receiver_buffer")] buf) {
+                match self.try_recv(|| self.wait_inner(), buf) {
                     Ok(msg) => return Ok(msg),
                     Err((_, TryRecvError::Disconnected)) => return Err(RecvError::Disconnected),
                     Err((inner, TryRecvError::Empty)) if i == 3 => break inner,
@@ -398,11 +390,10 @@ impl<T> Shared<T> {
     fn recv_deadline(
         &self,
         deadline: Instant,
-        #[cfg(feature = "receiver_buffer")]
         buf: &mut VecDeque<T>,
     ) -> Result<T, RecvTimeoutError> {
         // Attempt a speculative recv. If we are lucky there might be a message in the queue!
-        if let Ok(msg) = self.try_recv(|| self.wait_inner(), #[cfg(feature = "receiver_buffer")] buf) {
+        if let Ok(msg) = self.try_recv(|| self.wait_inner(), buf) {
             return Ok(msg);
         }
 
@@ -432,7 +423,7 @@ impl<T> Shared<T> {
             }
 
             // Attempt to receive a message from the queue
-            match self.try_recv(|| self.wait_inner(), #[cfg(feature = "receiver_buffer")] buf) {
+            match self.try_recv(|| self.wait_inner(), buf) {
                 Ok(msg) => break Ok(msg),
                 Err((_, TryRecvError::Empty)) => {},
                 Err((_, TryRecvError::Disconnected)) => break Err(RecvTimeoutError::Disconnected),
@@ -519,7 +510,6 @@ impl<T> Drop for Sender<T> {
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
     /// Buffer for messages
-    #[cfg(feature = "receiver_buffer")]
     buffer: RefCell<VecDeque<T>>,
     /// Used to prevent Sync being implemented for this type - we never actually use it!
     /// TODO: impl<T> !Sync for Receiver<T> {} when negative traits are stable
@@ -530,7 +520,7 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.shared.recv(#[cfg(feature = "receiver_buffer")] &mut self.buffer.borrow_mut())
+        self.shared.recv(&mut self.buffer.borrow_mut())
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
@@ -538,7 +528,6 @@ impl<T> Receiver<T> {
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
         self.shared.recv_deadline(
             Instant::now().checked_add(timeout).unwrap(),
-            #[cfg(feature = "receiver_buffer")]
             &mut self.buffer.borrow_mut()
         )
     }
@@ -546,10 +535,7 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        self.shared.recv_deadline(
-            deadline,
-            #[cfg(feature = "receiver_buffer")]
-                &mut self.buffer.borrow_mut())
+        self.shared.recv_deadline(deadline, &mut self.buffer.borrow_mut())
     }
 
     // Takes `&mut self` to avoid >1 task waiting on this channel
@@ -566,10 +552,7 @@ impl<T> Receiver<T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self
             .shared
-            .try_recv(
-                || self.shared.wait_inner(),
-                #[cfg(feature = "receiver_buffer")] &mut self.buffer.borrow_mut(),
-            )
+            .try_recv(|| self.shared.wait_inner(), &mut self.buffer.borrow_mut())
             .map_err(|(_, err)| err)
     }
 
@@ -691,7 +674,6 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
         Sender { shared: shared.clone() },
         Receiver {
             shared,
-            #[cfg(feature = "receiver_buffer")]
             buffer: RefCell::new(VecDeque::new()),
             _phantom_cell: UnsafeCell::new(())
         },
@@ -726,7 +708,6 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
         Sender { shared: shared.clone() },
         Receiver {
             shared,
-            #[cfg(feature = "receiver_buffer")]
             buffer: RefCell::new(VecDeque::new()),
             _phantom_cell: UnsafeCell::new(())
         },
