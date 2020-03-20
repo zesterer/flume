@@ -163,11 +163,16 @@ impl<T> Shared<T> {
 
     #[inline]
     fn with_inner<'a, R>(&'a self, f: impl FnOnce(spin::MutexGuard<'a, Inner<T>>) -> R) -> R {
+        let mut i = 0;
         loop {
-            if let Some(inner) = self.inner.try_lock() {
-                break f(inner);
+            for _ in 0..5 {
+                if let Some(inner) = self.inner.try_lock() {
+                    return f(inner);
+                }
+                thread::yield_now();
             }
-            thread::yield_now();
+            thread::sleep(Duration::from_nanos(i * 50));
+            i += 1;
         }
     }
 
