@@ -183,6 +183,26 @@ impl<T> Shared<T> {
     }
 
     #[inline]
+    fn wait_inner(&self) -> spin::MutexGuard<'_, Inner<T>> {
+        let mut i = 0;
+        loop {
+            for _ in 0..5 {
+                if let Some(inner) = self.inner.try_lock() {
+                    return inner;
+                }
+                thread::yield_now();
+            }
+            thread::sleep(Duration::from_nanos(i * 50));
+            i += 1;
+        }
+    }
+
+    #[inline]
+    fn poll_inner(&self) -> Option<spin::MutexGuard<'_, Inner<T>>> {
+        self.inner.try_lock()
+    }
+
+    #[inline]
     fn try_send(&self, msg: T) -> Result<(), (spin::MutexGuard<Inner<T>>, TrySendError<T>)> {
         self.with_inner(|mut inner| {
             if inner.listen_mode == 0 {
@@ -287,8 +307,9 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn try_recv(
-        &self,
+    fn try_recv<'a>(
+        &'a self,
+        take_inner: impl FnOnce() -> spin::MutexGuard<'a, Inner<T>>,
         #[cfg(feature = "receiver_buffer")]
         buf: &mut VecDeque<T>,
     ) -> Result<T, (spin::MutexGuard<Inner<T>>, TryRecvError)> {
@@ -299,44 +320,44 @@ impl<T> Shared<T> {
             }
         }
 
-        self.with_inner(|mut inner| {
-            let msg = match inner.queue.pop() {
-                Some(msg) => msg,
-                // If there's nothing more in the queue, this might be because there are no senders
-                None if inner.sender_count == 0 =>
-                    return Err((inner, TryRecvError::Disconnected)),
-                None => return Err((inner, TryRecvError::Empty)),
-            };
+        let mut inner = take_inner();
 
-            #[cfg(feature = "receiver_buffer")]
-            {
-                inner.queue.swap(buf);
+        let msg = match inner.queue.pop() {
+            Some(msg) => msg,
+            // If there's nothing more in the queue, this might be because there are no senders
+            None if inner.sender_count == 0 =>
+                return Err((inner, TryRecvError::Disconnected)),
+            None => return Err((inner, TryRecvError::Empty)),
+        };
+
+        #[cfg(feature = "receiver_buffer")]
+        {
+            inner.queue.swap(buf);
+        }
+
+        #[cfg(feature = "select")]
+        {
+            // Notify send selectors
+            inner
+                .send_selectors
+                .iter()
+                .for_each(|(_, signal, token)| {
+                    let mut guard = signal.wait_lock.lock().unwrap();
+                    *guard = Some(*token);
+                    signal.trigger.notify_one();
+                });
+        }
+
+        // If there are senders waiting for a message, wake them up.
+        if let Some(recv_trigger) = self.recv_trigger.as_ref() {
+            if inner.queue.is_bounded() && inner.send_waiters > 0 {
+                drop(inner);
+                let _ = self.wait_lock.lock().unwrap();
+                recv_trigger.notify_one();
             }
+        }
 
-            #[cfg(feature = "select")]
-            {
-                // Notify send selectors
-                inner
-                    .send_selectors
-                    .iter()
-                    .for_each(|(_, signal, token)| {
-                        let mut guard = signal.wait_lock.lock().unwrap();
-                        *guard = Some(*token);
-                        signal.trigger.notify_one();
-                    });
-            }
-
-            // If there are senders waiting for a message, wake them up.
-            if let Some(recv_trigger) = self.recv_trigger.as_ref() {
-                if inner.queue.is_bounded() && inner.send_waiters > 0 {
-                    drop(inner);
-                    let _ = self.wait_lock.lock().unwrap();
-                    recv_trigger.notify_one();
-                }
-            }
-
-            Ok(msg)
-        })
+        Ok(msg)
     }
 
     #[inline]
@@ -349,11 +370,11 @@ impl<T> Shared<T> {
             // Attempt to receive a message
             let mut i = 0;
             let mut inner = loop {
-                match self.try_recv(#[cfg(feature = "receiver_buffer")] buf) {
+                match self.try_recv(|| self.wait_inner(), #[cfg(feature = "receiver_buffer")] buf) {
                     Ok(msg) => return Ok(msg),
                     Err((_, TryRecvError::Disconnected)) => return Err(RecvError::Disconnected),
                     Err((inner, TryRecvError::Empty)) if i == 3 => break inner,
-                    Err((inner, TryRecvError::Empty)) => {},
+                    Err((_, TryRecvError::Empty)) => {},
                 };
                 thread::yield_now();
                 i += 1;
@@ -381,7 +402,7 @@ impl<T> Shared<T> {
         buf: &mut VecDeque<T>,
     ) -> Result<T, RecvTimeoutError> {
         // Attempt a speculative recv. If we are lucky there might be a message in the queue!
-        if let Ok(msg) = self.try_recv(#[cfg(feature = "receiver_buffer")] buf) {
+        if let Ok(msg) = self.try_recv(|| self.wait_inner(), #[cfg(feature = "receiver_buffer")] buf) {
             return Ok(msg);
         }
 
@@ -411,7 +432,7 @@ impl<T> Shared<T> {
             }
 
             // Attempt to receive a message from the queue
-            match self.try_recv(#[cfg(feature = "receiver_buffer")] buf) {
+            match self.try_recv(|| self.wait_inner(), #[cfg(feature = "receiver_buffer")] buf) {
                 Ok(msg) => break Ok(msg),
                 Err((_, TryRecvError::Empty)) => {},
                 Err((_, TryRecvError::Disconnected)) => break Err(RecvTimeoutError::Disconnected),
@@ -546,7 +567,8 @@ impl<T> Receiver<T> {
         self
             .shared
             .try_recv(
-            #[cfg(feature = "receiver_buffer")] &mut self.buffer.borrow_mut()
+                || self.shared.wait_inner(),
+                #[cfg(feature = "receiver_buffer")] &mut self.buffer.borrow_mut(),
             )
             .map_err(|(_, err)| err)
     }

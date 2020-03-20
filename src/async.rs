@@ -30,12 +30,17 @@ impl<'a, T> Future for RecvFuture<'a, T> {
         let res = self
             .recv
             .shared
-            .try_recv(
-                #[cfg(feature = "receiver_buffer")] &mut buf
-            );
+            .poll_inner()
+            .map(|inner| self
+                .recv
+                .shared
+                .try_recv(
+                    move || inner,
+                    #[cfg(feature = "receiver_buffer")] &mut buf,
+                ));
 
         let poll = match res {
-            Ok(msg) => {
+            Some(Ok(msg)) => {
                 self.recv.shared.with_inner(|mut inner| {
                     // Detach the waker
                     inner.recv_waker = None;
@@ -44,11 +49,16 @@ impl<'a, T> Future for RecvFuture<'a, T> {
                 });
                 Poll::Ready(Ok(msg))
             },
-            Err((_, TryRecvError::Disconnected)) => Poll::Ready(Err(RecvError::Disconnected)),
-            Err((mut inner, TryRecvError::Empty)) => {
+            Some(Err((_, TryRecvError::Disconnected))) => Poll::Ready(Err(RecvError::Disconnected)),
+            Some(Err((mut inner, TryRecvError::Empty))) => {
                 // Inform the sender that we need waking
                 inner.recv_waker = Some(cx.waker().clone());
                 inner.listen_mode = 2;
+                Poll::Pending
+            },
+            // Can't access the inner lock, try again
+            None => {
+                cx.waker().wake_by_ref();
                 Poll::Pending
             },
         };
