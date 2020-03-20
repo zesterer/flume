@@ -325,13 +325,13 @@ impl<T> Shared<T> {
             // Take a guard of the main lock to use later when waiting
             let guard = self.wait_lock.lock().unwrap();
             // Inform the sender that we need waking
-            inner.listen_mode += 1;
+            inner.listen_mode = 2;
             // We keep the queue alive until here to avoid a deadlock
             drop(inner);
             // Wait until we get a signal that the queue has new messages
             let _ = self.send_trigger.wait(guard).unwrap();
             // Inform the sender that we no longer need waking
-            self.with_inner(|mut inner| inner.listen_mode -= 1);
+            self.with_inner(|mut inner| inner.listen_mode = 1);
         }
     }
 
@@ -345,7 +345,7 @@ impl<T> Shared<T> {
 
         // Inform senders that we're going into a listening period and need to be notified of new
         // messages.
-        self.with_inner(|mut inner| inner.listen_mode += 1);
+        self.with_inner(|mut inner| inner.listen_mode = 2);
 
         let mut guard = self.wait_lock.lock().unwrap();
         let result = loop {
@@ -376,7 +376,7 @@ impl<T> Shared<T> {
             }
         };
         // Ensure the listen mode is reset
-        self.with_inner(|mut inner| inner.listen_mode -= 1);
+        self.with_inner(|mut inner| inner.listen_mode = 1);
         result
     }
 
@@ -525,7 +525,7 @@ impl<T> IntoIterator for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.shared.with_inner(|mut inner| inner.listen_mode -= 1);
+        self.shared.with_inner(|mut inner| inner.listen_mode = 0);
         self.shared.receiver_disconnected();
     }
 }

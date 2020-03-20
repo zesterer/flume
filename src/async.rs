@@ -34,15 +34,15 @@ impl<'a, T> Future for RecvFuture<'a, T> {
                 self.recv.shared.with_inner(|mut inner| {
                     // Detach the waker
                     inner.recv_waker = None;
-                    // Inform the sender that we need waking
-                    inner.listen_mode -= 1;
+                    // Inform the sender that we no longer need waking
+                    inner.listen_mode = 1;
                 });
                 Poll::Ready(Ok(msg))
             },
             Err((_, TryRecvError::Disconnected)) => Poll::Ready(Err(RecvError::Disconnected)),
             Err((mut inner, TryRecvError::Empty)) => {
-                // Inform the sender that we no longer need waking
-                inner.listen_mode += 1;
+                // Inform the sender that we need waking
+                inner.listen_mode = 2;
                 Poll::Pending
             },
         };
