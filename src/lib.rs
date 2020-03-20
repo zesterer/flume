@@ -596,14 +596,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self
-            .receiver
-            .shared
-            .recv(
-                #[cfg(feature = "receiver_buffer")]
-                    &mut self.receiver.buffer.borrow_mut()
-            )
-            .ok()
+        self.receiver.recv().ok()
     }
 }
 
@@ -616,14 +609,7 @@ impl<'a, T> Iterator for TryIter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self
-            .receiver
-            .shared
-            .try_recv(
-                #[cfg(feature = "receiver_buffer")]
-                    &mut self.receiver.buffer.borrow_mut()
-            )
-            .ok()
+        self.receiver.try_recv().ok()
     }
 }
 
@@ -659,14 +645,7 @@ impl<T> Iterator for IntoIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self
-            .receiver
-            .shared
-            .recv(
-                #[cfg(feature = "receiver_buffer")]
-                    &mut self.receiver.buffer.borrow_mut()
-            )
-            .ok()
+        self.receiver.recv().ok()
     }
 }
 
