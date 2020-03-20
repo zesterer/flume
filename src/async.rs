@@ -22,9 +22,6 @@ impl<'a, T> Future for RecvFuture<'a, T> {
     type Output = Result<T, RecvError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Set the waker. Cannot be done in the constructor as context is not provided yet
-        self.recv.shared.with_inner(|mut inner| inner.recv_waker = Some(cx.waker().clone()));
-
         // On success, set the waker to none to avoid it being woken again in case that is wrong
         // TODO: `poll_recv` instead to prevent even spinning?
         let res = self.recv.shared.try_recv();
@@ -42,6 +39,7 @@ impl<'a, T> Future for RecvFuture<'a, T> {
             Err((_, TryRecvError::Disconnected)) => Poll::Ready(Err(RecvError::Disconnected)),
             Err((mut inner, TryRecvError::Empty)) => {
                 // Inform the sender that we need waking
+                inner.recv_waker = Some(cx.waker().clone());
                 inner.listen_mode = 2;
                 Poll::Pending
             },
