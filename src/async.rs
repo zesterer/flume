@@ -39,7 +39,7 @@ impl<'a, T> Future for RecvFuture<'a, T> {
                 });
                 Poll::Ready(Ok(msg))
             },
-            Err((_guard, TryRecvError::Disconnected)) => Poll::Ready(Err(RecvError::Disconnected)),
+            Err((_, TryRecvError::Disconnected)) => Poll::Ready(Err(RecvError::Disconnected)),
             Err((mut inner, TryRecvError::Empty)) => {
                 // Inform the sender that we no longer need waking
                 inner.listen_mode += 1;

@@ -213,8 +213,8 @@ impl<T> Shared<T> {
             }
 
             // Notify the receiver of a new message
-            let _ = self.wait_lock.lock().unwrap();
             drop(inner); // Avoid a deadlock
+            let _ = self.wait_lock.lock().unwrap();
             self.send_trigger.notify_one();
 
             Ok(())
@@ -302,8 +302,8 @@ impl<T> Shared<T> {
             // If there are senders waiting for a message, wake them up.
             if let Some(recv_trigger) = self.recv_trigger.as_ref() {
                 if inner.queue.is_bounded() && inner.send_waiters > 0 {
-                    let _ = self.wait_lock.lock().unwrap();
                     drop(inner);
+                    let _ = self.wait_lock.lock().unwrap();
                     recv_trigger.notify_one();
                 }
             }
