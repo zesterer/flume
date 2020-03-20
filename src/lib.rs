@@ -36,6 +36,10 @@ use std::task::Waker;
 use crate::select::{Token, SelectorSignal};
 #[cfg(feature = "async")]
 use crate::r#async::RecvFuture;
+#[cfg(feature = "receiver_buffer")]
+use arraydeque::ArrayDeque;
+#[cfg(feature = "receiver_buffer")]
+use std::cell::RefCell;
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -281,7 +285,18 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn try_recv(&self) -> Result<T, (spin::MutexGuard<Inner<T>>, TryRecvError)> {
+    fn try_recv(
+        &self,
+        #[cfg(feature = "receiver_buffer")]
+        buf: &mut Buffer<T>,
+    ) -> Result<T, (spin::MutexGuard<Inner<T>>, TryRecvError)> {
+        #[cfg(feature = "receiver_buffer")]
+        {
+            if let Some(msg) = buf.pop_front() {
+                return Ok(msg)
+            }
+        }
+
         self.with_inner(|mut inner| {
             let msg = match inner.queue.pop() {
                 Some(msg) => msg,
@@ -290,6 +305,14 @@ impl<T> Shared<T> {
                     return Err((inner, TryRecvError::Disconnected)),
                 None => return Err((inner, TryRecvError::Empty)),
             };
+
+            #[cfg(feature = "receiver_buffer")]
+            for _ in 0..(BUFFER_SIZE - buf.len()) {
+                match inner.queue.pop() {
+                    Some(msg) => buf.push_back(msg).unwrap(), // TODO don't panic
+                    None => break,
+                }
+            }
 
             #[cfg(feature = "select")]
             {
@@ -318,10 +341,14 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn recv(&self) -> Result<T, RecvError> {
+    fn recv(
+        &self,
+        #[cfg(feature = "receiver_buffer")]
+        buf: &mut Buffer<T>,
+    ) -> Result<T, RecvError> {
         loop {
             // Attempt to receive a message
-            let mut inner = match self.try_recv() {
+            let mut inner = match self.try_recv(#[cfg(feature = "receiver_buffer")] buf) {
                 Ok(msg) => break Ok(msg),
                 Err((_, TryRecvError::Disconnected)) => break Err(RecvError::Disconnected),
                 Err((queue, TryRecvError::Empty)) => queue,
@@ -342,9 +369,14 @@ impl<T> Shared<T> {
 
     // TODO: Change this to `recv_timeout` to potentially avoid an extra call to `Instant::now()`?
     #[inline]
-    fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
+    fn recv_deadline(
+        &self,
+        deadline: Instant,
+        #[cfg(feature = "receiver_buffer")]
+        buf: &mut Buffer<T>,
+    ) -> Result<T, RecvTimeoutError> {
         // Attempt a speculative recv. If we are lucky there might be a message in the queue!
-        if let Ok(msg) = self.try_recv() {
+        if let Ok(msg) = self.try_recv(#[cfg(feature = "receiver_buffer")] buf) {
             return Ok(msg);
         }
 
@@ -374,7 +406,7 @@ impl<T> Shared<T> {
             }
 
             // Attempt to receive a message from the queue
-            match self.try_recv() {
+            match self.try_recv(#[cfg(feature = "receiver_buffer")] buf) {
                 Ok(msg) => break Ok(msg),
                 Err((_, TryRecvError::Empty)) => {},
                 Err((_, TryRecvError::Disconnected)) => break Err(RecvTimeoutError::Disconnected),
@@ -457,9 +489,17 @@ impl<T> Drop for Sender<T> {
     }
 }
 
+#[cfg(feature = "receiver_buffer")]
+const BUFFER_SIZE: usize = 32;
+#[cfg(feature = "receiver_buffer")]
+type Buffer<T> = ArrayDeque<[T; BUFFER_SIZE], arraydeque::Saturating>;
+
 /// The receiving end of a channel.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
+    /// Buffer for messages
+    #[cfg(feature = "receiver_buffer")]
+    buffer: RefCell<Buffer<T>>,
     /// Used to prevent Sync being implemented for this type - we never actually use it!
     /// TODO: impl<T> !Sync for Receiver<T> {} when negative traits are stable
     _phantom_cell: UnsafeCell<()>,
@@ -469,19 +509,26 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.shared.recv()
+        self.shared.recv(#[cfg(feature = "receiver_buffer")] &mut self.buffer.borrow_mut())
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped or the timeout has expired.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-        self.shared.recv_deadline(Instant::now().checked_add(timeout).unwrap())
+        self.shared.recv_deadline(
+            Instant::now().checked_add(timeout).unwrap(),
+            #[cfg(feature = "receiver_buffer")]
+            &mut self.buffer.borrow_mut()
+        )
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        self.shared.recv_deadline(deadline)
+        self.shared.recv_deadline(
+            deadline,
+            #[cfg(feature = "receiver_buffer")]
+                &mut self.buffer.borrow_mut())
     }
 
     // Takes `&mut self` to avoid >1 task waiting on this channel
@@ -496,7 +543,12 @@ impl<T> Receiver<T> {
     /// Attempt to fetch an incoming value from the channel associated with this receiver,
     /// returning an error if the channel is empty or all channel senders have been dropped.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.shared.try_recv().map_err(|(_, err)| err)
+        self
+            .shared
+            .try_recv(
+            #[cfg(feature = "receiver_buffer")] &mut self.buffer.borrow_mut()
+            )
+            .map_err(|(_, err)| err)
     }
 
     /// A blocking iterator over the values received on the channel that finishes iteration when
@@ -544,7 +596,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.receiver.shared.recv().ok()
+        self.receiver.recv().ok()
     }
 }
 
@@ -557,7 +609,7 @@ impl<'a, T> Iterator for TryIter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.receiver.shared.try_recv().ok()
+        self.receiver.try_recv().ok()
     }
 }
 
@@ -593,7 +645,7 @@ impl<T> Iterator for IntoIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.receiver.shared.recv().ok()
+        self.receiver.recv().ok()
     }
 }
 
@@ -615,7 +667,12 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(None));
     (
         Sender { shared: shared.clone() },
-        Receiver { shared, _phantom_cell: UnsafeCell::new(()) },
+        Receiver {
+            shared,
+            #[cfg(feature = "receiver_buffer")]
+            buffer: RefCell::new(ArrayDeque::new()),
+            _phantom_cell: UnsafeCell::new(())
+        },
     )
 }
 
@@ -645,6 +702,11 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(Some(cap)));
     (
         Sender { shared: shared.clone() },
-        Receiver { shared, _phantom_cell: UnsafeCell::new(()) },
+        Receiver {
+            shared,
+            #[cfg(feature = "receiver_buffer")]
+            buffer: RefCell::new(ArrayDeque::new()),
+            _phantom_cell: UnsafeCell::new(())
+        },
     )
 }
