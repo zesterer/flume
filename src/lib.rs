@@ -81,10 +81,10 @@ struct Signal<T: Copy = ()> {
 
 impl<T: Copy> Signal<T> {
     fn wait<G>(&self, sync_guard: G) -> T {
-        let mut guard = self.lock.lock().unwrap();
+        let guard = self.lock.lock().unwrap();
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
-        let mut guard = self.trigger.wait(guard).unwrap();
+        let guard = self.trigger.wait(guard).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
         *guard
     }
@@ -94,16 +94,16 @@ impl<T: Copy> Signal<T> {
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
         *guard = inital;
-        let mut guard = self.trigger.wait_while(guard, move |inner| f(inner)).unwrap();
+        let guard = self.trigger.wait_while(guard, move |inner| f(inner)).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
         *guard
     }
 
     fn wait_timeout<G>(&self, dur: Duration, sync_guard: G) -> (T, WaitTimeoutResult) {
-        let mut guard = self.lock.lock().unwrap();
+        let guard = self.lock.lock().unwrap();
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
-        let (mut guard, timeout) = self.trigger.wait_timeout(guard, dur).unwrap();
+        let (guard, timeout) = self.trigger.wait_timeout(guard, dur).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
         (*guard, timeout)
     }
@@ -111,7 +111,7 @@ impl<T: Copy> Signal<T> {
     fn notify_one<G>(&self, sync_guard: G) {
         if self.waiters.load(Ordering::Relaxed) > 0 {
             drop(sync_guard);
-            let guard = self.lock.lock().unwrap();
+            let _guard = self.lock.lock().unwrap();
             self.trigger.notify_one();
         }
     }
@@ -128,7 +128,7 @@ impl<T: Copy> Signal<T> {
     fn notify_all<G>(&self, sync_guard: G) {
         if self.waiters.load(Ordering::Relaxed) > 0 {
             drop(sync_guard);
-            let guard = self.lock.lock().unwrap();
+            let _guard = self.lock.lock().unwrap();
             self.trigger.notify_all();
         }
     }
@@ -289,46 +289,45 @@ impl<T> Shared<T> {
 
     #[inline]
     fn try_send(&self, msg: T) -> Result<Option<MutexGuard<Inner<T>>>, (MutexGuard<Inner<T>>, TrySendError<T>)> {
-        self.with_inner(|mut inner| {
-            if inner.listen_mode == 0 {
-                // If the listener has disconnected, the channel is dead
-                return Err((inner, TrySendError::Disconnected(msg)));
-            }
+        let mut inner = self.wait_inner();
 
-            // If pushing fails, it's because the queue is full
-            let rendezvous = match inner.queue.push(msg) {
-                Err(msg) => return Err((inner, TrySendError::Full(msg))),
-                Ok(rendezvous) => rendezvous,
-            };
+        if inner.listen_mode == 0 {
+            // If the listener has disconnected, the channel is dead
+            return Err((inner, TrySendError::Disconnected(msg)));
+        }
+        // If pushing fails, it's because the queue is full
+        let rendezvous = match inner.queue.push(msg) {
+            Err(msg) => return Err((inner, TrySendError::Full(msg))),
+            Ok(rendezvous) => rendezvous,
+        };
 
-            // TODO: Move this below the listen_mode check by making selectors listen-aware
-            #[cfg(feature = "select")]
-            {
-                // Notify the receiving selector
-                if let Some((signal, token)) = &inner.recv_selector {
-                    signal.notify_one_with(*token, ());
-                }
+        // TODO: Move this below the listen_mode check by making selectors listen-aware
+        #[cfg(feature = "select")]
+        {
+            // Notify the receiving selector
+            if let Some((signal, token)) = &inner.recv_selector {
+                signal.notify_one_with(*token, ());
             }
+        }
 
-            // TODO: Have a different listen mode for async vs sync receivers?
-            #[cfg(feature = "async")]
-            {
-                // Notify the receiving async task
-                if let Some(recv_waker) = &inner.recv_waker {
-                    recv_waker.wake_by_ref();
-                }
+        // TODO: Have a different listen mode for async vs sync receivers?
+        #[cfg(feature = "async")]
+        {
+            // Notify the receiving async task
+            if let Some(recv_waker) = &inner.recv_waker {
+                recv_waker.wake_by_ref();
             }
+        }
 
-            if rendezvous {
-                // Notify the receiver of a new message
-                self.send_signal.notify_one(());
-                Ok(Some(inner))
-            } else {
-                // Notify the receiver of a new message
-                self.send_signal.notify_one(inner);
-                Ok(None)
-            }
-        })
+        if rendezvous {
+            // Notify the receiver of a new message
+            self.send_signal.notify_one(());
+            Ok(Some(inner))
+        } else {
+            // Notify the receiver of a new message
+            self.send_signal.notify_one(inner);
+            Ok(None)
+        }
     }
 
     #[inline]
@@ -377,7 +376,7 @@ impl<T> Shared<T> {
 
     #[inline]
     fn take_remaining(&self) -> Queue<T> {
-        self.with_inner(|mut inner| inner.queue.take())
+        self.wait_inner().queue.take()
     }
 
     #[inline]
@@ -549,7 +548,7 @@ impl<T> Clone for Sender<T> {
     /// Clone this sender. [`Sender`] acts as a handle to a channel, and the channel will only be
     /// cleaned up when all senders and the receiver have been dropped.
     fn clone(&self) -> Self {
-        self.shared.with_inner(|mut inner| inner.sender_count += 1);
+        self.shared.wait_inner().sender_count += 1;
         //self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
         Self { shared: self.shared.clone() }
     }
@@ -559,10 +558,11 @@ impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         // Notify the receiver that all senders have been dropped if the number of senders drops
         // to 0.
-        if self.shared.with_inner(|mut inner| {
+        if {
+            let mut inner = self.shared.wait_inner();
             inner.sender_count -= 1;
             inner.sender_count
-        }) == 0 {
+        } == 0 {
             self.shared.all_senders_disconnected();
         }
     }
@@ -649,7 +649,7 @@ impl<T> IntoIterator for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.shared.with_inner(|mut inner| inner.listen_mode = 0);
+        self.shared.wait_inner().listen_mode = 0;
         self.shared.receiver_disconnected();
     }
 }
