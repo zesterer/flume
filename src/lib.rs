@@ -201,6 +201,7 @@ impl<T> Shared<T> {
     }
 
     #[inline]
+    #[cfg(feature = "async")]
     fn poll_inner(&self) -> Option<spin::MutexGuard<'_, Inner<T>>> {
         self.inner.try_lock()
     }
