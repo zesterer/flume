@@ -83,6 +83,16 @@ impl<T: Copy> Signal<T> {
         guard.1
     }
 
+    fn wait_while<G>(&self, sync_guard: G, inital: T, mut f: impl FnMut(&T) -> bool) -> T {
+        let mut guard = self.lock.lock().unwrap();
+        drop(sync_guard);
+        guard.0 += 1;
+        guard.1 = inital;
+        let mut guard = self.trigger.wait_while(guard, move |(_, inner)| f(inner)).unwrap();
+        guard.0 -= 1;
+        guard.1
+    }
+
     fn wait_timeout<G>(&self, dur: Duration, sync_guard: G) -> (T, WaitTimeoutResult) {
         let mut guard = self.lock.lock().unwrap();
         drop(sync_guard);
@@ -101,8 +111,8 @@ impl<T: Copy> Signal<T> {
 
     fn notify_one_with(&self, item: T) {
         let mut guard = self.lock.lock().unwrap();
-        guard.1 = item;
         if guard.0 > 0 {
+            guard.1 = item;
             self.trigger.notify_one();
         }
     }
@@ -123,12 +133,12 @@ impl<T> Queue<T> {
 
     fn len(&self) -> usize { self.0.len() }
 
-    fn push(&mut self, x: T) -> Option<T> {
-        if Some(self.0.len()) == self.1 {
-            Some(x)
+    fn push(&mut self, x: T) -> Result<bool, T> {
+        if self.1.map(|cap| cap.max(1) == self.0.len()).unwrap_or(false) {
+            Err(x)
         } else {
             self.0.push_back(x);
-            None
+            Ok(self.1 == Some(0)) // Rendezvous
         }
     }
 
@@ -169,8 +179,6 @@ struct Inner<T> {
     /// 'dead' and the listener will begin reporting disconnect errors (once the queue has been
     /// drained).
     sender_count: usize,
-    /// The number of senders waiting for notifications that the queue has space.
-    send_waiters: usize,
     /// Used to describe the state of the receiving end of the queue:
     /// - 0 => Receiver has been dropped, so the channel is 'dead'
     /// - 1 => Receiver still exists, but is not waiting for notifications
@@ -186,6 +194,7 @@ struct Shared<T> {
     // Used for notifying senders about the queue no longer being full. Therefore, this is only a
     // `Some` for bounded queues.
     recv_signal: Option<Signal>,
+    rendezvous_signal: Option<Signal<bool>>,
 }
 
 impl<T> Shared<T> {
@@ -205,11 +214,11 @@ impl<T> Shared<T> {
                 recv_waker: None,
 
                 sender_count: 1,
-                send_waiters: 0,
                 listen_mode: 1,
             }),
             send_signal: Signal::default(),
             recv_signal: if cap.is_some() { Some(Signal::default()) } else { None },
+            rendezvous_signal: if cap == Some(0) { Some(Signal::default()) } else { None },
         }
     }
 
@@ -249,7 +258,7 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn try_send(&self, msg: T) -> Result<(), (spin::MutexGuard<Inner<T>>, TrySendError<T>)> {
+    fn try_send(&self, msg: T) -> Result<Option<spin::MutexGuard<Inner<T>>>, (spin::MutexGuard<Inner<T>>, TrySendError<T>)> {
         self.with_inner(|mut inner| {
             if inner.listen_mode == 0 {
                 // If the listener has disconnected, the channel is dead
@@ -257,9 +266,10 @@ impl<T> Shared<T> {
             }
 
             // If pushing fails, it's because the queue is full
-            if let Some(msg) = inner.queue.push(msg) {
-                return Err((inner, TrySendError::Full(msg)));
-            }
+            let rendezvous = match inner.queue.push(msg) {
+                Err(msg) => return Err((inner, TrySendError::Full(msg))),
+                Ok(rendezvous) => rendezvous,
+            };
 
             // TODO: Move this below the listen_mode check by making selectors listen-aware
             #[cfg(feature = "select")]
@@ -267,7 +277,6 @@ impl<T> Shared<T> {
                 // Notify the receiving selector
                 if let Some((signal, token)) = &inner.recv_selector {
                     signal.notify_one_with(*token);
-                    return Ok(());
                 }
             }
 
@@ -280,11 +289,16 @@ impl<T> Shared<T> {
                 }
             }
 
-            drop(inner);
-            // Notify the receiver of a new message
-            self.send_signal.notify_one();
-
-            Ok(())
+            if rendezvous {
+                // Notify the receiver of a new message
+                self.send_signal.notify_one();
+                Ok(Some(inner))
+            } else {
+                drop(inner);
+                // Notify the receiver of a new message
+                self.send_signal.notify_one();
+                Ok(None)
+            }
         })
     }
 
@@ -292,8 +306,13 @@ impl<T> Shared<T> {
     fn send(&self, mut msg: T) -> Result<(), SendError<T>> {
         loop {
             // Attempt to send a message
-            let mut inner = match self.try_send(msg) {
-                Ok(()) => return Ok(()),
+            let inner = match self.try_send(msg) {
+                Ok(Some(inner)) => {
+                    // Rendezvous
+                    self.rendezvous_signal.as_ref().unwrap().wait_while(inner, false, |taken| !*taken);
+                    return Ok(());
+                },
+                Ok(None) => return Ok(()),
                 Err((_, TrySendError::Disconnected(msg))) => return Err(SendError(msg)),
                 Err((inner, TrySendError::Full(m))) => {
                     msg = m;
@@ -346,7 +365,13 @@ impl<T> Shared<T> {
         let mut inner = take_inner();
 
         let msg = match inner.queue.pop() {
-            Some(msg) => msg,
+            Some(msg) => {
+                // Activate redezvous
+                if let Some(rendezvous_signal) = self.rendezvous_signal.as_ref() {
+                    rendezvous_signal.notify_one_with(true);
+                }
+                msg
+            },
             // If there's nothing more in the queue, this might be because there are no senders
             None if inner.sender_count == 0 =>
                 return Err((inner, TryRecvError::Disconnected)),
@@ -385,7 +410,7 @@ impl<T> Shared<T> {
         loop {
             // Attempt to receive a message
             let mut i = 0;
-            let mut inner = loop {
+            let inner = loop {
                 match self.try_recv(|| self.wait_inner(), buf) {
                     Ok(msg) => return Ok(msg),
                     Err((_, TryRecvError::Disconnected)) => return Err(RecvError::Disconnected),
@@ -488,7 +513,7 @@ impl<T> Sender<T> {
     /// receiver has been dropped, an error is returned. If the channel associated with this
     /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        self.shared.try_send(msg).map_err(|(_, err)| err)
+        self.shared.try_send(msg).map(|_| ()).map_err(|(_, err)| err)
     }
 }
 
