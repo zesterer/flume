@@ -33,7 +33,7 @@ use std::{
 #[cfg(feature = "async")]
 use std::task::Waker;
 #[cfg(feature = "select")]
-use crate::select::{Token, SelectorSignal};
+use crate::select::Token;
 #[cfg(feature = "async")]
 use crate::r#async::RecvFuture;
 
@@ -68,38 +68,48 @@ pub enum RecvTimeoutError {
 }
 
 #[derive(Default)]
-struct Signal {
-    lock: Mutex<usize>,
+struct Signal<T: Copy = ()> {
+    lock: Mutex<(usize, T)>,
     trigger: Condvar,
 }
 
-impl Signal {
-    fn wait<T>(&self, guard: T) {
-        let mut waiters_guard = self.lock.lock().unwrap();
-        drop(guard);
-        *waiters_guard += 1;
-        *self.trigger.wait(waiters_guard).unwrap() -= 1;
+impl<T: Copy> Signal<T> {
+    fn wait<G>(&self, sync_guard: G) -> T {
+        let mut guard = self.lock.lock().unwrap();
+        drop(sync_guard);
+        guard.0 += 1;
+        let mut guard = self.trigger.wait(guard).unwrap();
+        guard.0 -= 1;
+        guard.1
     }
 
-    fn wait_timeout<T>(&self, dur: Duration, guard: T) -> WaitTimeoutResult {
-        let mut waiters_guard = self.lock.lock().unwrap();
-        drop(guard);
-        *waiters_guard += 1;
-        let (mut waiters_guard, timeout) = self.trigger.wait_timeout(waiters_guard, dur).unwrap();
-        *waiters_guard -= 1;
-        timeout
+    fn wait_timeout<G>(&self, dur: Duration, sync_guard: G) -> (T, WaitTimeoutResult) {
+        let mut guard = self.lock.lock().unwrap();
+        drop(sync_guard);
+        guard.0 += 1;
+        let (mut guard, timeout) = self.trigger.wait_timeout(guard, dur).unwrap();
+        guard.0 -= 1;
+        (guard.1, timeout)
     }
 
     fn notify_one(&self) {
-        let waiters_guard = self.lock.lock().unwrap();
-        if *waiters_guard > 0 {
+        let guard = self.lock.lock().unwrap();
+        if guard.0 > 0 {
+            self.trigger.notify_one();
+        }
+    }
+
+    fn notify_one_with(&self, item: T) {
+        let mut guard = self.lock.lock().unwrap();
+        guard.1 = item;
+        if guard.0 > 0 {
             self.trigger.notify_one();
         }
     }
 
     fn notify_all(&self) {
-        let waiters_guard = self.lock.lock().unwrap();
-        if *waiters_guard > 0 {
+        let guard = self.lock.lock().unwrap();
+        if guard.0 > 0 {
             self.trigger.notify_all();
         }
     }
@@ -148,10 +158,10 @@ struct Inner<T> {
     send_selector_counter: usize,
     /// Used to waken sender selectors
     #[cfg(feature = "select")]
-    send_selectors: Vec<(usize, Arc<SelectorSignal>, Token)>,
+    send_selectors: Vec<(usize, Arc<Signal<Token>>, Token)>,
     /// Used to waken a receiver selector
     #[cfg(feature = "select")]
-    recv_selector: Option<(Arc<SelectorSignal>, Token)>,
+    recv_selector: Option<(Arc<Signal<Token>>, Token)>,
     /// Used to waken an async receiver task
     #[cfg(feature = "async")]
     recv_waker: Option<Waker>,
@@ -256,11 +266,7 @@ impl<T> Shared<T> {
             {
                 // Notify the receiving selector
                 if let Some((signal, token)) = &inner.recv_selector {
-                    let mut guard = signal.wait_lock.lock().unwrap();
-                    // TODO: Can we get away with not having this here? Seems like it
-                    //drop(inner); // Avoid a deadlock
-                    *guard = Some(*token);
-                    signal.trigger.notify_one();
+                    signal.notify_one_with(*token);
                     return Ok(());
                 }
             }
@@ -357,9 +363,7 @@ impl<T> Shared<T> {
                 .send_selectors
                 .iter()
                 .for_each(|(_, signal, token)| {
-                    let mut guard = signal.wait_lock.lock().unwrap();
-                    *guard = Some(*token);
-                    signal.trigger.notify_one();
+                    signal.notify_one_with(*token);
                 });
         }
 
@@ -424,7 +428,7 @@ impl<T> Shared<T> {
 
             // Wait for the given timeout (or, at least, try to - this may complete before the
             // timeout due to spurious wakeup events).
-            let timeout = self.send_signal.wait_timeout(timeout, inner);
+            let timeout = self.send_signal.wait_timeout(timeout, inner).1;
             if timeout.timed_out() {
                 // This was a timeout rather than a wakeup, so produce a timeout error.
                 break Err(RecvTimeoutError::Timeout);
@@ -441,7 +445,7 @@ impl<T> Shared<T> {
 
     #[cfg(feature = "select")]
     #[inline]
-    fn connect_send_selector(&self, signal: Arc<SelectorSignal>, token: Token) -> usize {
+    fn connect_send_selector(&self, signal: Arc<Signal<Token>>, token: Token) -> usize {
         let mut inner = self.inner.lock();
         inner.send_selector_counter += 1;
         let id = inner.send_selector_counter;
@@ -457,7 +461,7 @@ impl<T> Shared<T> {
 
     #[cfg(feature = "select")]
     #[inline]
-    fn connect_recv_selector(&self, signal: Arc<SelectorSignal>, token: Token) {
+    fn connect_recv_selector(&self, signal: Arc<Signal<Token>>, token: Token) {
         self.inner.lock().recv_selector = Some((signal, token));
     }
 
