@@ -24,7 +24,7 @@ pub use select::Selector;
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex, atomic::{AtomicUsize, Ordering}},
     time::{Duration, Instant},
     cell::{UnsafeCell, RefCell},
     marker::PhantomData,
@@ -67,46 +67,9 @@ pub enum RecvTimeoutError {
     Disconnected,
 }
 
-/// Wrapper around a queue. This wrapper exists to permit a maximum length.
-struct Queue<T>(VecDeque<T>, Option<usize>);
-
-impl<T> Queue<T> {
-    fn new(cap: Option<usize>) -> Self { Self(VecDeque::new(), cap) }
-
-    fn len(&self) -> usize { self.0.len() }
-
-    fn is_bounded(&self) -> bool { self.1.is_some() }
-
-    fn push(&mut self, x: T) -> Option<T> {
-        if Some(self.0.len()) == self.1 {
-            Some(x)
-        } else {
-            self.0.push_back(x);
-            None
-        }
-    }
-
-    fn pop(&mut self) -> Option<T> {
-        self.0.pop_front()
-    }
-
-    fn swap(&mut self, buf: &mut VecDeque<T>) {
-        // TODO: Swapping on bounded queues doesn't work correctly since it gives senders a false
-        // impression of how many items are in the queue, allowing them to push too many items into
-        // the queue
-        if !self.is_bounded() {
-            std::mem::swap(&mut self.0, buf);
-        }
-    }
-
-    fn take(&mut self) -> Self {
-        std::mem::replace(self, Queue(VecDeque::new(), self.1))
-    }
-}
-
 struct Inner<T> {
     /// The internal queue
-    queue: Queue<T>,
+    queue: VecDeque<T>,
     /// In ID generator for sender selectors so we can keep track of them
     #[cfg(feature = "select")]
     send_selector_counter: usize,
@@ -142,13 +105,15 @@ struct Shared<T> {
     // Used for notifying senders about the queue no longer being full. Therefore, this is only a
     // `Some` for bounded queues.
     recv_trigger: Option<Condvar>,
+    // Maximum queue capacity
+    space_left: Option<AtomicUsize>,
 }
 
 impl<T> Shared<T> {
     fn new(cap: Option<usize>) -> Self {
         Self {
             inner: spin::Mutex::new(Inner {
-                queue: Queue::new(cap),
+                queue: VecDeque::with_capacity(cap.unwrap_or(0)), // TODO: Is this ok?
 
                 #[cfg(feature = "select")]
                 send_selector_counter: 0,
@@ -164,6 +129,7 @@ impl<T> Shared<T> {
                 send_waiters: 0,
                 listen_mode: 1,
             }),
+            space_left: cap.map(AtomicUsize::new),
             wait_lock: Mutex::new(()),
             send_trigger: Condvar::new(),
             recv_trigger: None,
@@ -180,8 +146,8 @@ impl<T> Shared<T> {
                 }
                 thread::yield_now();
             }
-            thread::sleep(Duration::from_nanos(i * 50));
             i += 1;
+            thread::sleep(Duration::from_nanos(i * 250));
         }
     }
 
@@ -195,8 +161,8 @@ impl<T> Shared<T> {
                 }
                 thread::yield_now();
             }
-            thread::sleep(Duration::from_nanos(i * 50));
             i += 1;
+            thread::sleep(Duration::from_nanos(i * 250));
         }
     }
 
@@ -207,16 +173,32 @@ impl<T> Shared<T> {
 
     #[inline]
     fn try_send(&self, msg: T) -> Result<(), (spin::MutexGuard<Inner<T>>, TrySendError<T>)> {
+        if let Some(space_left) = self.space_left.as_ref() {
+            'outer: loop {
+                let mut space = space_left.load(Ordering::Relaxed);
+                while space > 0 {
+                    match space_left.compare_exchange_weak(
+                        space,
+                        space - 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break 'outer,
+                        Err(e) => space = e,
+                    }
+                }
+
+                return Err((self.wait_inner(), TrySendError::Full(msg)));
+            }
+        }
+
         self.with_inner(|mut inner| {
             if inner.listen_mode == 0 {
                 // If the listener has disconnected, the channel is dead
                 return Err((inner, TrySendError::Disconnected(msg)));
             }
 
-            // If pushing fails, it's because the queue is full
-            if let Some(msg) = inner.queue.push(msg) {
-                return Err((inner, TrySendError::Full(msg)));
-            }
+            inner.queue.push_back(msg);
 
             // TODO: Move this below the listen_mode check by making selectors listen-aware
             #[cfg(feature = "select")]
@@ -305,57 +287,92 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn take_remaining(&self) -> Queue<T> {
-        self.with_inner(|mut inner| inner.queue.take())
+    fn take_remaining(&self) -> VecDeque<T> {
+        self.with_inner(|mut inner| std::mem::take(&mut inner.queue))
     }
 
     #[inline]
     fn try_recv<'a>(
         &'a self,
-        take_inner: impl FnOnce() -> spin::MutexGuard<'a, Inner<T>>,
+        mut take_inner: impl FnMut() -> spin::MutexGuard<'a, Inner<T>>,
         buf: &mut VecDeque<T>,
     ) -> Result<T, (spin::MutexGuard<Inner<T>>, TryRecvError)> {
-        // Eagerly check the buffer
-        if let Some(msg) = buf.pop_front() {
-            return Ok(msg)
-        }
+        let mut inner = None;
+        loop {
+            if let Some(msg) = buf.pop_front() {
+                if self.space_left.as_ref().map(|sl| sl.fetch_add(1, Ordering::Relaxed)) == Some(0) {
+                    let mut inner = inner.unwrap_or_else(take_inner);
 
-        let mut inner = take_inner();
+                    #[cfg(feature = "select")]
+                    {
+                        // Notify send selectors
+                        inner
+                            .send_selectors
+                            .iter()
+                            .for_each(|(_, signal, token)| {
+                                let mut guard = signal.wait_lock.lock().unwrap();
+                                *guard = Some(*token);
+                                signal.trigger.notify_one();
+                            });
+                    }
 
-        let msg = match inner.queue.pop() {
-            Some(msg) => msg,
-            // If there's nothing more in the queue, this might be because there are no senders
-            None if inner.sender_count == 0 =>
-                return Err((inner, TryRecvError::Disconnected)),
-            None => return Err((inner, TryRecvError::Empty)),
-        };
-
-        // Swap the buffers to grab the messages
-        inner.queue.swap(buf);
-
-        #[cfg(feature = "select")]
-        {
-            // Notify send selectors
-            inner
-                .send_selectors
-                .iter()
-                .for_each(|(_, signal, token)| {
-                    let mut guard = signal.wait_lock.lock().unwrap();
-                    *guard = Some(*token);
-                    signal.trigger.notify_one();
-                });
-        }
-
-        // If there are senders waiting for a message, wake them up.
-        if let Some(recv_trigger) = self.recv_trigger.as_ref() {
-            if inner.queue.is_bounded() && inner.send_waiters > 0 {
-                drop(inner);
-                let _ = self.wait_lock.lock().unwrap();
-                recv_trigger.notify_one();
+                    if inner.send_waiters > 0 {
+                        drop(inner);
+                        let _ = self.wait_lock.lock().unwrap();
+                        self.recv_trigger.as_ref().unwrap().notify_one();
+                    }
+                }
+                return Ok(msg)
+            } else {
+                inner = Some(inner.unwrap_or_else(&mut take_inner));
+                // Swap buffers
+                let mut inner_ref = inner.as_mut().unwrap();
+                if inner_ref.queue.len() == 0 {
+                    if inner_ref.sender_count == 0 {
+                        return Err((inner.unwrap(), TryRecvError::Disconnected));
+                    } else {
+                        return Err((inner.unwrap(), TryRecvError::Empty));
+                    }
+                } else {
+                    std::mem::swap(&mut inner_ref.queue, buf);
+                }
             }
         }
 
-        Ok(msg)
+        // let msg = match inner.queue.pop_front() {
+        //     Some(msg) => msg,
+        //     // If there's nothing more in the queue, this might be because there are no senders
+        //     None if inner.sender_count == 0 =>
+        //         return Err((inner, TryRecvError::Disconnected)),
+        //     None => return Err((inner, TryRecvError::Empty)),
+        // };
+
+        // // Swap the buffers to grab the messages
+        // std::mem::swap(&mut inner_ref.queue, buf);
+
+        // #[cfg(feature = "select")]
+        // {
+        //     // Notify send selectors
+        //     inner
+        //         .send_selectors
+        //         .iter()
+        //         .for_each(|(_, signal, token)| {
+        //             let mut guard = signal.wait_lock.lock().unwrap();
+        //             *guard = Some(*token);
+        //             signal.trigger.notify_one();
+        //         });
+        // }
+
+        // If there are senders waiting for a message, wake them up.
+        // if let Some(recv_trigger) = self.recv_trigger.as_ref() {
+        //     if inner.queue.is_bounded() && inner.send_waiters > 0 {
+        //         drop(inner);
+        //         let _ = self.wait_lock.lock().unwrap();
+        //         recv_trigger.notify_one();
+        //     }
+        // }
+
+        //Ok(msg)
     }
 
     #[inline]
@@ -577,7 +594,7 @@ impl<T> Receiver<T> {
     /// `try_iter`, the iterator will not attempt to fetch any more values from the channel once
     /// the function has been called.
     pub fn drain(&self) -> Drain<T> {
-        Drain { queue: self.shared.take_remaining(), _phantom: PhantomData }
+        Drain { queue: self.buffer.borrow_mut().drain(..).chain(self.shared.take_remaining().into_iter()).collect(), _phantom: PhantomData }
     }
 }
 
@@ -625,7 +642,7 @@ impl<'a, T> Iterator for TryIter<'a, T> {
 
 /// An fixed-sized iterator over the items drained from a channel.
 pub struct Drain<'a, T> {
-    queue: Queue<T>,
+    queue: VecDeque<T>,
     /// A phantom field used to constrain the lifetime of this iterator. We do this because the
     /// implementation may change and we don't want to unintentionally constrain it. Removing this
     /// lifetime later is a possibility.
@@ -636,7 +653,7 @@ impl<'a, T> Iterator for Drain<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.queue.pop()
+        self.queue.pop_front()
     }
 }
 

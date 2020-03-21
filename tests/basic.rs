@@ -93,7 +93,9 @@ fn drain() {
         tx.send(i).unwrap();
     }
 
-    assert_eq!(rx.drain().sum::<u32>(), (0..100).sum());
+    assert_eq!(rx.recv(), Ok(0));
+
+    assert_eq!(rx.drain().sum::<u32>(), (1..100).sum());
 }
 
 #[test]

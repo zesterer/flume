@@ -10,6 +10,9 @@ categories = ["concurrency", "data-structures"]
 license = "Apache-2.0/MIT"
 readme = "README.md"
 
+[profile.release]
+debug = true
+
 [features]
 select = []
 async = []
