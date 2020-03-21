@@ -26,7 +26,7 @@ use std::{
     collections::VecDeque,
     sync::{Arc, Condvar, Mutex, WaitTimeoutResult, atomic::{AtomicUsize, Ordering}},
     time::{Duration, Instant},
-    cell::{UnsafeCell, RefCell},
+    cell::{RefCell, Cell},
     marker::PhantomData,
     thread,
 };
@@ -141,6 +141,7 @@ impl<T> Queue<T> {
     fn new(cap: Option<usize>) -> Self { Self(VecDeque::new(), cap) }
 
     fn len(&self) -> usize { self.0.len() }
+    fn is_bounded(&self) -> bool { self.1.is_some() }
 
     fn push(&mut self, x: T) -> Result<bool, T> {
         if self.1.map(|cap| cap.max(1) == self.0.len()).unwrap_or(false) {
@@ -156,12 +157,7 @@ impl<T> Queue<T> {
     }
 
     fn swap(&mut self, buf: &mut VecDeque<T>) {
-        // TODO: Swapping on bounded queues doesn't work correctly since it gives senders a false
-        // impression of how many items are in the queue, allowing them to push too many items into
-        // the queue
-        if !self.1.is_some() {
-            std::mem::swap(&mut self.0, buf);
-        }
+        std::mem::swap(&mut self.0, buf);
     }
 
     fn take(&mut self) -> Self {
@@ -188,11 +184,7 @@ struct Inner<T> {
     /// 'dead' and the listener will begin reporting disconnect errors (once the queue has been
     /// drained).
     sender_count: usize,
-    /// Used to describe the state of the receiving end of the queue:
-    /// - 0 => Receiver has been dropped, so the channel is 'dead'
-    /// - 1 => Receiver still exists, but is not waiting for notifications
-    /// - x => Receiver is waiting for incoming message notifications
-    listen_mode: usize,
+    receiver_count: usize,
 }
 
 struct Shared<T> {
@@ -223,7 +215,7 @@ impl<T> Shared<T> {
                 recv_waker: None,
 
                 sender_count: 1,
-                listen_mode: 1,
+                receiver_count: 1,
             }),
             send_signal: Signal::default(),
             recv_signal: if cap.is_some() { Some(Signal::default()) } else { None },
@@ -269,7 +261,7 @@ impl<T> Shared<T> {
     fn try_send(&self, msg: T) -> Result<Option<MutexGuard<Inner<T>>>, (MutexGuard<Inner<T>>, TrySendError<T>)> {
         let mut inner = self.wait_inner();
 
-        if inner.listen_mode == 0 {
+        if inner.receiver_count == 0 {
             // If the listener has disconnected, the channel is dead
             return Err((inner, TrySendError::Disconnected(msg)));
         }
@@ -347,7 +339,7 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn receiver_disconnected(&self) {
+    fn all_receivers_disconnected(&self) {
         if let Some(recv_signal) = self.recv_signal.as_ref() {
             recv_signal.notify_all(self.inner.lock());
         }
@@ -363,6 +355,7 @@ impl<T> Shared<T> {
         &'a self,
         take_inner: impl FnOnce() -> MutexGuard<'a, Inner<T>>,
         buf: &mut VecDeque<T>,
+        mpmc_mode: bool,
     ) -> Result<T, (MutexGuard<Inner<T>>, TryRecvError)> {
         // Eagerly check the buffer
         if let Some(msg) = buf.pop_front() {
@@ -386,7 +379,13 @@ impl<T> Shared<T> {
         };
 
         // Swap the buffers to grab the messages
-        inner.queue.swap(buf);
+        // TODO: Swapping on bounded queues doesn't work correctly since it gives senders a false
+        // impression of how many items are in the queue, allowing them to push too many items into
+        // the queue
+        // Also, swapping when there is more than one receiver is also not permitted
+        if !inner.queue.is_bounded() && !mpmc_mode {
+            inner.queue.swap(buf);
+        }
 
         #[cfg(feature = "select")]
         {
@@ -412,12 +411,13 @@ impl<T> Shared<T> {
     fn recv(
         &self,
         buf: &mut VecDeque<T>,
+        mpmc_mode: bool,
     ) -> Result<T, RecvError> {
         loop {
             // Attempt to receive a message
             let mut i = 0;
             let inner = loop {
-                match self.try_recv(|| self.wait_inner(), buf) {
+                match self.try_recv(|| self.wait_inner(), buf, mpmc_mode) {
                     Ok(msg) => return Ok(msg),
                     Err((_, TryRecvError::Disconnected)) => return Err(RecvError::Disconnected),
                     Err((inner, TryRecvError::Empty)) if i == 3 => break inner,
@@ -438,9 +438,10 @@ impl<T> Shared<T> {
         &self,
         deadline: Instant,
         buf: &mut VecDeque<T>,
+        mpmc_mode: bool,
     ) -> Result<T, RecvTimeoutError> {
         // Attempt a speculative recv. If we are lucky there might be a message in the queue!
-        let mut inner = match self.try_recv(|| self.wait_inner(), buf) {
+        let mut inner = match self.try_recv(|| self.wait_inner(), buf, mpmc_mode) {
             Ok(msg) => return Ok(msg),
             Err((_, TryRecvError::Disconnected)) => return Err(RecvTimeoutError::Disconnected),
             Err((inner, TryRecvError::Empty)) => inner,
@@ -466,7 +467,7 @@ impl<T> Shared<T> {
             }
 
             // Attempt to receive a message from the queue
-            inner = match self.try_recv(|| self.wait_inner(), buf) {
+            inner = match self.try_recv(|| self.wait_inner(), buf, mpmc_mode) {
                 Ok(msg) => return Ok(msg),
                 Err((inner, TryRecvError::Empty)) => inner,
                 Err((_, TryRecvError::Disconnected)) => return Err(RecvTimeoutError::Disconnected),
@@ -550,18 +551,16 @@ impl<T> Drop for Sender<T> {
 /// The receiving end of a channel.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
-    /// Buffer for messages
+    mpmc_mode: Cell<bool>,
+    /// Buffer for messages (only uses when mpmc_mode is false)
     buffer: RefCell<VecDeque<T>>,
-    /// Used to prevent Sync being implemented for this type - we never actually use it!
-    /// TODO: impl<T> !Sync for Receiver<T> {} when negative traits are stable
-    _phantom_cell: UnsafeCell<()>,
 }
 
 impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.shared.recv(&mut self.buffer.borrow_mut())
+        self.shared.recv(&mut self.buffer.borrow_mut(), self.mpmc_mode.get())
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
@@ -569,14 +568,15 @@ impl<T> Receiver<T> {
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
         self.shared.recv_deadline(
             Instant::now().checked_add(timeout).unwrap(),
-            &mut self.buffer.borrow_mut()
+            &mut self.buffer.borrow_mut(),
+            self.mpmc_mode.get(),
         )
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        self.shared.recv_deadline(deadline, &mut self.buffer.borrow_mut())
+        self.shared.recv_deadline(deadline, &mut self.buffer.borrow_mut(), self.mpmc_mode.get())
     }
 
     // Takes `&mut self` to avoid >1 task waiting on this channel
@@ -593,7 +593,7 @@ impl<T> Receiver<T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self
             .shared
-            .try_recv(|| self.shared.wait_inner(), &mut self.buffer.borrow_mut())
+            .try_recv(|| self.shared.wait_inner(), &mut self.buffer.borrow_mut(), self.mpmc_mode.get())
             .map_err(|(_, err)| err)
     }
 
@@ -626,10 +626,37 @@ impl<T> IntoIterator for Receiver<T> {
     }
 }
 
+impl<T> Clone for Receiver<T> {
+    /// Clone this receiver. [`Receiver`] acts as a handle to a channel, and the channel will only
+    /// be cleaned up when all senders and receivers have been dropped. Note that cloning the
+    /// receiver *does not* turn enable message broadcasting.
+    fn clone(&self) -> Self {
+        self.mpmc_mode.set(true);
+        {
+            let mut inner = self.shared.wait_inner();
+            inner.receiver_count += 1;
+            for item in std::mem::take(&mut *self.buffer.borrow_mut()).into_iter().rev() {
+                inner.queue.0.push_front(item);
+            }
+        }
+        //self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
+        Self {
+            shared: self.shared.clone(),
+            mpmc_mode: Cell::new(true),
+            buffer: RefCell::new(VecDeque::new()),
+        }
+    }
+}
+
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.shared.wait_inner().listen_mode = 0;
-        self.shared.receiver_disconnected();
+        if {
+            let mut inner = self.shared.wait_inner();
+            inner.receiver_count -= 1;
+            inner.receiver_count
+        } == 0 {
+            self.shared.all_receivers_disconnected();
+        }
     }
 }
 
@@ -715,8 +742,8 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
         Sender { shared: shared.clone() },
         Receiver {
             shared,
+            mpmc_mode: Cell::new(false),
             buffer: RefCell::new(VecDeque::new()),
-            _phantom_cell: UnsafeCell::new(())
         },
     )
 }
@@ -749,8 +776,8 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
         Sender { shared: shared.clone() },
         Receiver {
             shared,
+            mpmc_mode: Cell::new(false),
             buffer: RefCell::new(VecDeque::new()),
-            _phantom_cell: UnsafeCell::new(())
         },
     )
 }

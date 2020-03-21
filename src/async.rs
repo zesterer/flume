@@ -39,10 +39,8 @@ impl<'a, T> Future for RecvFuture<'a, T> {
                     .try_recv(move || {
                         // Detach the waker
                         inner.recv_waker = None;
-                        // Inform the sender that we no longer need waking
-                        inner.listen_mode = 1;
                         inner
-                    }, &mut buf))
+                    }, &mut buf, self.recv.mpmc_mode.get()))
         };
 
         let poll = match res {
@@ -51,7 +49,6 @@ impl<'a, T> Future for RecvFuture<'a, T> {
             Some(Err((mut inner, TryRecvError::Empty))) => {
                 // Inform the sender that we need waking
                 inner.recv_waker = Some(cx.waker().clone());
-                inner.listen_mode = 2;
                 Poll::Pending
             },
             // Can't access the inner lock, try again
