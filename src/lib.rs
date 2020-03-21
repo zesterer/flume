@@ -24,12 +24,17 @@ pub use select::Selector;
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Condvar, Mutex, MutexGuard},
+    sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
     cell::{UnsafeCell, RefCell},
     marker::PhantomData,
     thread,
 };
+#[cfg(windows)]
+use std::sync::{Mutex as InnerMutex, MutexGuard};
+#[cfg(not(windows))]
+use spin::{Mutex as InnerMutex, MutexGuard};
+
 #[cfg(feature = "async")]
 use std::task::Waker;
 #[cfg(feature = "select")]
@@ -134,7 +139,7 @@ struct Inner<T> {
 
 struct Shared<T> {
     // Mutable state
-    inner: Mutex<Inner<T>>,
+    inner: InnerMutex<Inner<T>>,
     /// Mutexed used for locking condvars.
     wait_lock: Mutex<()>,
     /// Used for notifying the receiver about incoming messages.
@@ -147,7 +152,7 @@ struct Shared<T> {
 impl<T> Shared<T> {
     fn new(cap: Option<usize>) -> Self {
         Self {
-            inner: Mutex::new(Inner {
+            inner: InnerMutex::new(Inner {
                 queue: Queue::new(cap),
 
                 #[cfg(feature = "select")]
@@ -171,18 +176,59 @@ impl<T> Shared<T> {
     }
 
     #[inline]
+    #[cfg(not(windows))]
     fn with_inner<'a, R>(&'a self, f: impl FnOnce(MutexGuard<'a, Inner<T>>) -> R) -> R {
-        f(self.inner.lock().unwrap())
+        let mut i = 0;
+        loop {
+            for _ in 0..5 {
+                if let Some(inner) = self.inner.try_lock() {
+                    return f(inner);
+                }
+                thread::yield_now();
+            }
+            thread::sleep(Duration::from_nanos(i * 50));
+            i += 1;
+        }
     }
 
     #[inline]
+    fn lock_inner(&self) -> MutexGuard<Inner<T>> {
+        #[cfg(windows)] { self.inner.lock().unwrap() }
+        #[cfg(not(windows))] { self.inner.lock() }
+    }
+
+    #[inline]
+    #[cfg(windows)]
+    fn with_inner<'a, R>(&'a self, f: impl FnOnce(MutexGuard<'a, Inner<T>>) -> R) -> R {
+        f(self.lock_inner())
+    }
+
+    #[inline]
+    #[cfg(not(windows))]
     fn wait_inner(&self) -> MutexGuard<'_, Inner<T>> {
-        self.inner.lock().unwrap()
+        let mut i = 0;
+        loop {
+            for _ in 0..5 {
+                if let Some(inner) = self.inner.try_lock() {
+                    return inner;
+                }
+                thread::yield_now();
+            }
+            thread::sleep(Duration::from_nanos(i * 50));
+            i += 1;
+        }
+    }
+
+    #[inline]
+    #[cfg(windows)]
+    fn wait_inner(&self) -> MutexGuard<'_, Inner<T>> {
+        self.lock_inner().unwrap()
     }
 
     #[inline]
     fn poll_inner(&self) -> Option<MutexGuard<'_, Inner<T>>> {
-        self.inner.try_lock().ok()
+        #[cfg(windows)] { self.inner.try_lock().ok() }
+        #[cfg(not(windows))] { self.inner.try_lock() }
     }
 
     #[inline]
@@ -270,7 +316,7 @@ impl<T> Shared<T> {
         self.send_trigger.notify_all(); // TODO: notify_one instead? Which is faster?
         #[cfg(feature = "async")]
         {
-            if let Some(recv_waker) = &self.inner.lock().unwrap().recv_waker {
+            if let Some(recv_waker) = &self.lock_inner().recv_waker {
                 recv_waker.wake_by_ref();
             }
         }
@@ -422,7 +468,7 @@ impl<T> Shared<T> {
     #[cfg(feature = "select")]
     #[inline]
     fn connect_send_selector(&self, signal: Arc<SelectorSignal>, token: Token) -> usize {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock_inner();
         inner.send_selector_counter += 1;
         let id = inner.send_selector_counter;
         inner.send_selectors.push((id, signal, token));
@@ -432,19 +478,19 @@ impl<T> Shared<T> {
     #[cfg(feature = "select")]
     #[inline]
     fn disconnect_send_selector(&self, id: usize) {
-        self.inner.lock().unwrap().send_selectors.retain(|(s_id, _, _)| s_id != &id);
+        self.lock_inner().send_selectors.retain(|(s_id, _, _)| s_id != &id);
     }
 
     #[cfg(feature = "select")]
     #[inline]
     fn connect_recv_selector(&self, signal: Arc<SelectorSignal>, token: Token) {
-        self.inner.lock().unwrap().recv_selector = Some((signal, token));
+        self.lock_inner().recv_selector = Some((signal, token));
     }
 
     #[cfg(feature = "select")]
     #[inline]
     fn disconnect_recv_selector(&self) {
-        self.inner.lock().unwrap().recv_selector = None;
+        self.lock_inner().recv_selector = None;
     }
 }
 
