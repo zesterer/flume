@@ -24,7 +24,7 @@ pub use select::Selector;
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Condvar, Mutex, WaitTimeoutResult},
+    sync::{Arc, Condvar, Mutex, WaitTimeoutResult, atomic::{AtomicUsize, Ordering}},
     time::{Duration, Instant},
     cell::{UnsafeCell, RefCell},
     marker::PhantomData,
@@ -69,57 +69,61 @@ pub enum RecvTimeoutError {
 
 #[derive(Default)]
 struct Signal<T: Copy = ()> {
-    lock: Mutex<(usize, T)>,
+    lock: Mutex<T>,
     trigger: Condvar,
+    waiters: AtomicUsize,
 }
 
 impl<T: Copy> Signal<T> {
     fn wait<G>(&self, sync_guard: G) -> T {
         let mut guard = self.lock.lock().unwrap();
+        self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
-        guard.0 += 1;
         let mut guard = self.trigger.wait(guard).unwrap();
-        guard.0 -= 1;
-        guard.1
+        self.waiters.fetch_sub(1, Ordering::Relaxed);
+        *guard
     }
 
     fn wait_while<G>(&self, sync_guard: G, inital: T, mut f: impl FnMut(&T) -> bool) -> T {
         let mut guard = self.lock.lock().unwrap();
+        self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
-        guard.0 += 1;
-        guard.1 = inital;
-        let mut guard = self.trigger.wait_while(guard, move |(_, inner)| f(inner)).unwrap();
-        guard.0 -= 1;
-        guard.1
+        *guard = inital;
+        let mut guard = self.trigger.wait_while(guard, move |inner| f(inner)).unwrap();
+        self.waiters.fetch_sub(1, Ordering::Relaxed);
+        *guard
     }
 
     fn wait_timeout<G>(&self, dur: Duration, sync_guard: G) -> (T, WaitTimeoutResult) {
         let mut guard = self.lock.lock().unwrap();
+        self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
-        guard.0 += 1;
         let (mut guard, timeout) = self.trigger.wait_timeout(guard, dur).unwrap();
-        guard.0 -= 1;
-        (guard.1, timeout)
+        self.waiters.fetch_sub(1, Ordering::Relaxed);
+        (*guard, timeout)
     }
 
-    fn notify_one(&self) {
-        let guard = self.lock.lock().unwrap();
-        if guard.0 > 0 {
+    fn notify_one<G>(&self, sync_guard: G) {
+        if self.waiters.load(Ordering::Relaxed) > 0 {
+            drop(sync_guard);
+            let guard = self.lock.lock().unwrap();
             self.trigger.notify_one();
         }
     }
 
-    fn notify_one_with(&self, item: T) {
-        let mut guard = self.lock.lock().unwrap();
-        if guard.0 > 0 {
-            guard.1 = item;
+    fn notify_one_with<G>(&self, item: T, sync_guard: G) {
+        if self.waiters.load(Ordering::Relaxed) > 0 {
+            drop(sync_guard);
+            let mut guard = self.lock.lock().unwrap();
+            *guard = item;
             self.trigger.notify_one();
         }
     }
 
-    fn notify_all(&self) {
-        let guard = self.lock.lock().unwrap();
-        if guard.0 > 0 {
+    fn notify_all<G>(&self, sync_guard: G) {
+        if self.waiters.load(Ordering::Relaxed) > 0 {
+            drop(sync_guard);
+            let guard = self.lock.lock().unwrap();
             self.trigger.notify_all();
         }
     }
@@ -276,7 +280,7 @@ impl<T> Shared<T> {
             {
                 // Notify the receiving selector
                 if let Some((signal, token)) = &inner.recv_selector {
-                    signal.notify_one_with(*token);
+                    signal.notify_one_with(*token, ());
                 }
             }
 
@@ -291,12 +295,11 @@ impl<T> Shared<T> {
 
             if rendezvous {
                 // Notify the receiver of a new message
-                self.send_signal.notify_one();
+                self.send_signal.notify_one(());
                 Ok(Some(inner))
             } else {
-                drop(inner);
                 // Notify the receiver of a new message
-                self.send_signal.notify_one();
+                self.send_signal.notify_one(inner);
                 Ok(None)
             }
         })
@@ -330,7 +333,7 @@ impl<T> Shared<T> {
     /// Inform the receiver that all senders have been dropped
     #[inline]
     fn all_senders_disconnected(&self) {
-        self.send_signal.notify_all();
+        self.send_signal.notify_all(self.inner.lock());
         #[cfg(feature = "async")]
         {
             if let Some(recv_waker) = &self.inner.lock().recv_waker {
@@ -342,7 +345,7 @@ impl<T> Shared<T> {
     #[inline]
     fn receiver_disconnected(&self) {
         if let Some(recv_signal) = self.recv_signal.as_ref() {
-            recv_signal.notify_all();
+            recv_signal.notify_all(self.inner.lock());
         }
     }
 
@@ -368,7 +371,7 @@ impl<T> Shared<T> {
             Some(msg) => {
                 // Activate redezvous
                 if let Some(rendezvous_signal) = self.rendezvous_signal.as_ref() {
-                    rendezvous_signal.notify_one_with(true);
+                    rendezvous_signal.notify_one_with(true, ());
                 }
                 msg
             },
@@ -388,15 +391,14 @@ impl<T> Shared<T> {
                 .send_selectors
                 .iter()
                 .for_each(|(_, signal, token)| {
-                    signal.notify_one_with(*token);
+                    signal.notify_one_with(*token, ());
                 });
         }
 
         // If there are senders waiting for a message, wake them up.
         if let Some(recv_signal) = self.recv_signal.as_ref() {
-            drop(inner);
             // Notify the receiver of a new message
-            recv_signal.notify_one();
+            recv_signal.notify_one(inner);
         }
 
         Ok(msg)
