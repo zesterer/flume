@@ -227,21 +227,6 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn with_inner<'a, R>(&'a self, f: impl FnOnce(spin::MutexGuard<'a, Inner<T>>) -> R) -> R {
-        let mut i = 0;
-        loop {
-            for _ in 0..5 {
-                if let Some(inner) = self.inner.try_lock() {
-                    return f(inner);
-                }
-                thread::yield_now();
-            }
-            thread::sleep(Duration::from_nanos(i * 50));
-            i += 1;
-        }
-    }
-
-    #[inline]
     fn wait_inner(&self) -> spin::MutexGuard<'_, Inner<T>> {
         let mut i = 0;
         loop {
@@ -263,46 +248,46 @@ impl<T> Shared<T> {
 
     #[inline]
     fn try_send(&self, msg: T) -> Result<Option<spin::MutexGuard<Inner<T>>>, (spin::MutexGuard<Inner<T>>, TrySendError<T>)> {
-        self.with_inner(|mut inner| {
-            if inner.listen_mode == 0 {
-                // If the listener has disconnected, the channel is dead
-                return Err((inner, TrySendError::Disconnected(msg)));
-            }
+        let mut inner = self.wait_inner();
 
-            // If pushing fails, it's because the queue is full
-            let rendezvous = match inner.queue.push(msg) {
-                Err(msg) => return Err((inner, TrySendError::Full(msg))),
-                Ok(rendezvous) => rendezvous,
-            };
+        if inner.listen_mode == 0 {
+            // If the listener has disconnected, the channel is dead
+            return Err((inner, TrySendError::Disconnected(msg)));
+        }
 
-            // TODO: Move this below the listen_mode check by making selectors listen-aware
-            #[cfg(feature = "select")]
-            {
-                // Notify the receiving selector
-                if let Some((signal, token)) = &inner.recv_selector {
-                    signal.notify_one_with(*token, ());
-                }
-            }
+        // If pushing fails, it's because the queue is full
+        let rendezvous = match inner.queue.push(msg) {
+            Err(msg) => return Err((inner, TrySendError::Full(msg))),
+            Ok(rendezvous) => rendezvous,
+        };
 
-            // TODO: Have a different listen mode for async vs sync receivers?
-            #[cfg(feature = "async")]
-            {
-                // Notify the receiving async task
-                if let Some(recv_waker) = &inner.recv_waker {
-                    recv_waker.wake_by_ref();
-                }
+        // TODO: Move this below the listen_mode check by making selectors listen-aware
+        #[cfg(feature = "select")]
+        {
+            // Notify the receiving selector
+            if let Some((signal, token)) = &inner.recv_selector {
+                signal.notify_one_with(*token, ());
             }
+        }
 
-            if rendezvous {
-                // Notify the receiver of a new message
-                self.send_signal.notify_one(());
-                Ok(Some(inner))
-            } else {
-                // Notify the receiver of a new message
-                self.send_signal.notify_one(inner);
-                Ok(None)
+        // TODO: Have a different listen mode for async vs sync receivers?
+        #[cfg(feature = "async")]
+        {
+            // Notify the receiving async task
+            if let Some(recv_waker) = &inner.recv_waker {
+                recv_waker.wake_by_ref();
             }
-        })
+        }
+
+        if rendezvous {
+            // Notify the receiver of a new message
+            self.send_signal.notify_one(());
+            Ok(Some(inner))
+        } else {
+            // Notify the receiver of a new message
+            self.send_signal.notify_one(inner);
+            Ok(None)
+        }
     }
 
     #[inline]
@@ -351,7 +336,7 @@ impl<T> Shared<T> {
 
     #[inline]
     fn take_remaining(&self) -> Queue<T> {
-        self.with_inner(|mut inner| inner.queue.take())
+        self.wait_inner().queue.take()
     }
 
     #[inline]
@@ -523,7 +508,7 @@ impl<T> Clone for Sender<T> {
     /// Clone this sender. [`Sender`] acts as a handle to a channel, and the channel will only be
     /// cleaned up when all senders and the receiver have been dropped.
     fn clone(&self) -> Self {
-        self.shared.with_inner(|mut inner| inner.sender_count += 1);
+        self.shared.wait_inner().sender_count += 1;
         //self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
         Self { shared: self.shared.clone() }
     }
@@ -533,10 +518,11 @@ impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         // Notify the receiver that all senders have been dropped if the number of senders drops
         // to 0.
-        if self.shared.with_inner(|mut inner| {
+        if {
+            let mut inner = self.shared.wait_inner();
             inner.sender_count -= 1;
             inner.sender_count
-        }) == 0 {
+        } == 0 {
             self.shared.all_senders_disconnected();
         }
     }
@@ -623,7 +609,7 @@ impl<T> IntoIterator for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.shared.with_inner(|mut inner| inner.listen_mode = 0);
+        self.shared.wait_inner().listen_mode = 0;
         self.shared.receiver_disconnected();
     }
 }
