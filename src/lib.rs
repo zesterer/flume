@@ -30,6 +30,11 @@ use std::{
     marker::PhantomData,
     thread,
 };
+#[cfg(windows)]
+use std::sync::{Mutex as InnerMutex, MutexGuard};
+#[cfg(not(windows))]
+use spin::{Mutex as InnerMutex, MutexGuard};
+
 #[cfg(feature = "async")]
 use std::task::Waker;
 #[cfg(feature = "select")]
@@ -192,7 +197,7 @@ struct Inner<T> {
 
 struct Shared<T> {
     // Mutable state
-    inner: spin::Mutex<Inner<T>>,
+    inner: InnerMutex<Inner<T>>,
     /// Used for notifying the receiver about incoming messages.
     send_signal: Signal,
     // Used for notifying senders about the queue no longer being full. Therefore, this is only a
@@ -204,7 +209,7 @@ struct Shared<T> {
 impl<T> Shared<T> {
     fn new(cap: Option<usize>) -> Self {
         Self {
-            inner: spin::Mutex::new(Inner {
+            inner: InnerMutex::new(Inner {
                 queue: Queue::new(cap),
 
                 #[cfg(feature = "select")]
@@ -227,7 +232,14 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn wait_inner(&self) -> spin::MutexGuard<'_, Inner<T>> {
+    fn lock_inner(&self) -> MutexGuard<Inner<T>> {
+        #[cfg(windows)] { self.inner.lock().unwrap() }
+        #[cfg(not(windows))] { self.inner.lock() }
+    }
+
+    #[inline]
+    #[cfg(not(windows))]
+    fn wait_inner(&self) -> MutexGuard<'_, Inner<T>> {
         let mut i = 0;
         loop {
             for _ in 0..5 {
@@ -242,19 +254,25 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn poll_inner(&self) -> Option<spin::MutexGuard<'_, Inner<T>>> {
-        self.inner.try_lock()
+    #[cfg(windows)]
+    fn wait_inner(&self) -> MutexGuard<'_, Inner<T>> {
+        self.lock_inner()
     }
 
     #[inline]
-    fn try_send(&self, msg: T) -> Result<Option<spin::MutexGuard<Inner<T>>>, (spin::MutexGuard<Inner<T>>, TrySendError<T>)> {
+    fn poll_inner(&self) -> Option<MutexGuard<'_, Inner<T>>> {
+        #[cfg(windows)] { self.inner.try_lock().ok() }
+        #[cfg(not(windows))] { self.inner.try_lock() }
+    }
+
+    #[inline]
+    fn try_send(&self, msg: T) -> Result<Option<MutexGuard<Inner<T>>>, (MutexGuard<Inner<T>>, TrySendError<T>)> {
         let mut inner = self.wait_inner();
 
         if inner.listen_mode == 0 {
             // If the listener has disconnected, the channel is dead
             return Err((inner, TrySendError::Disconnected(msg)));
         }
-
         // If pushing fails, it's because the queue is full
         let rendezvous = match inner.queue.push(msg) {
             Err(msg) => return Err((inner, TrySendError::Full(msg))),
@@ -321,7 +339,7 @@ impl<T> Shared<T> {
         self.send_signal.notify_all(self.inner.lock());
         #[cfg(feature = "async")]
         {
-            if let Some(recv_waker) = &self.inner.lock().recv_waker {
+            if let Some(recv_waker) = &self.lock_inner().recv_waker {
                 recv_waker.wake_by_ref();
             }
         }
@@ -342,9 +360,9 @@ impl<T> Shared<T> {
     #[inline]
     fn try_recv<'a>(
         &'a self,
-        take_inner: impl FnOnce() -> spin::MutexGuard<'a, Inner<T>>,
+        take_inner: impl FnOnce() -> MutexGuard<'a, Inner<T>>,
         buf: &mut VecDeque<T>,
-    ) -> Result<T, (spin::MutexGuard<Inner<T>>, TryRecvError)> {
+    ) -> Result<T, (MutexGuard<Inner<T>>, TryRecvError)> {
         // Eagerly check the buffer
         if let Some(msg) = buf.pop_front() {
             return Ok(msg)
@@ -458,7 +476,7 @@ impl<T> Shared<T> {
     #[cfg(feature = "select")]
     #[inline]
     fn connect_send_selector(&self, signal: Arc<Signal<Token>>, token: Token) -> usize {
-        let mut inner = self.inner.lock();
+        let mut inner = self.lock_inner();
         inner.send_selector_counter += 1;
         let id = inner.send_selector_counter;
         inner.send_selectors.push((id, signal, token));
@@ -468,19 +486,19 @@ impl<T> Shared<T> {
     #[cfg(feature = "select")]
     #[inline]
     fn disconnect_send_selector(&self, id: usize) {
-        self.inner.lock().send_selectors.retain(|(s_id, _, _)| s_id != &id);
+        self.lock_inner().send_selectors.retain(|(s_id, _, _)| s_id != &id);
     }
 
     #[cfg(feature = "select")]
     #[inline]
     fn connect_recv_selector(&self, signal: Arc<Signal<Token>>, token: Token) {
-        self.inner.lock().recv_selector = Some((signal, token));
+        self.lock_inner().recv_selector = Some((signal, token));
     }
 
     #[cfg(feature = "select")]
     #[inline]
     fn disconnect_recv_selector(&self) {
-        self.inner.lock().recv_selector = None;
+        self.lock_inner().recv_selector = None;
     }
 }
 
