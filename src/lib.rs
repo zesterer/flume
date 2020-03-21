@@ -232,31 +232,9 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    #[cfg(not(windows))]
-    fn with_inner<'a, R>(&'a self, f: impl FnOnce(MutexGuard<'a, Inner<T>>) -> R) -> R {
-        let mut i = 0;
-        loop {
-            for _ in 0..5 {
-                if let Some(inner) = self.inner.try_lock() {
-                    return f(inner);
-                }
-                thread::yield_now();
-            }
-            thread::sleep(Duration::from_nanos(i * 50));
-            i += 1;
-        }
-    }
-
-    #[inline]
     fn lock_inner(&self) -> MutexGuard<Inner<T>> {
         #[cfg(windows)] { self.inner.lock().unwrap() }
         #[cfg(not(windows))] { self.inner.lock() }
-    }
-
-    #[inline]
-    #[cfg(windows)]
-    fn with_inner<'a, R>(&'a self, f: impl FnOnce(MutexGuard<'a, Inner<T>>) -> R) -> R {
-        f(self.lock_inner())
     }
 
     #[inline]
