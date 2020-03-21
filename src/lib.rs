@@ -76,10 +76,10 @@ struct Signal<T: Copy = ()> {
 
 impl<T: Copy> Signal<T> {
     fn wait<G>(&self, sync_guard: G) -> T {
-        let mut guard = self.lock.lock().unwrap();
+        let guard = self.lock.lock().unwrap();
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
-        let mut guard = self.trigger.wait(guard).unwrap();
+        let guard = self.trigger.wait(guard).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
         *guard
     }
@@ -89,16 +89,16 @@ impl<T: Copy> Signal<T> {
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
         *guard = inital;
-        let mut guard = self.trigger.wait_while(guard, move |inner| f(inner)).unwrap();
+        let guard = self.trigger.wait_while(guard, move |inner| f(inner)).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
         *guard
     }
 
     fn wait_timeout<G>(&self, dur: Duration, sync_guard: G) -> (T, WaitTimeoutResult) {
-        let mut guard = self.lock.lock().unwrap();
+        let guard = self.lock.lock().unwrap();
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
-        let (mut guard, timeout) = self.trigger.wait_timeout(guard, dur).unwrap();
+        let (guard, timeout) = self.trigger.wait_timeout(guard, dur).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
         (*guard, timeout)
     }
@@ -106,7 +106,7 @@ impl<T: Copy> Signal<T> {
     fn notify_one<G>(&self, sync_guard: G) {
         if self.waiters.load(Ordering::Relaxed) > 0 {
             drop(sync_guard);
-            let guard = self.lock.lock().unwrap();
+            let _guard = self.lock.lock().unwrap();
             self.trigger.notify_one();
         }
     }
@@ -123,7 +123,7 @@ impl<T: Copy> Signal<T> {
     fn notify_all<G>(&self, sync_guard: G) {
         if self.waiters.load(Ordering::Relaxed) > 0 {
             drop(sync_guard);
-            let guard = self.lock.lock().unwrap();
+            let _guard = self.lock.lock().unwrap();
             self.trigger.notify_all();
         }
     }
