@@ -38,7 +38,7 @@ pub struct Selector<'a, T> {
         Box<dyn FnMut() + 'a>, // Drop
     )>,
     next_poll: usize,
-    signal: Arc<SelectorSignal>,
+    signal: Arc<Signal<Token>>,
 }
 
 impl<'a, T> Selector<'a, T> {
@@ -47,11 +47,7 @@ impl<'a, T> Selector<'a, T> {
         Self {
             selections: Vec::new(),
             next_poll: 0,
-            signal: Arc::new(SelectorSignal {
-                wait_lock: Mutex::new(None),
-                trigger: Condvar::new(),
-                //listeners: AtomicUsize::new(0)
-            }),
+            signal: Arc::new(Signal::default()),
         }
     }
 
@@ -114,13 +110,9 @@ impl<'a, T> Selector<'a, T> {
         }
 
         loop {
-            let mut guard = self.signal.wait_lock.lock().unwrap();
-            // Reset token
-            *guard = None;
-            // TODO: use signal.listeners
-            //self.signal.listeners.fetch_add(1, Ordering::Acquire);
-            let token = *self.signal.trigger.wait(guard).unwrap();
-            //self.signal.listeners.fetch_sub(1, Ordering::Acquire);
+            // Wait for a token to become active
+            // TODO: Currently, all awaits produce a token
+            let token = Some(self.signal.wait(()));
 
             // Attempt to receive a message
             if let Some(msg) = match token {

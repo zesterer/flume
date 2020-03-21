@@ -24,7 +24,7 @@ pub use select::Selector;
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex, WaitTimeoutResult},
     time::{Duration, Instant},
     cell::{UnsafeCell, RefCell},
     marker::PhantomData,
@@ -38,7 +38,7 @@ use spin::{Mutex as InnerMutex, MutexGuard};
 #[cfg(feature = "async")]
 use std::task::Waker;
 #[cfg(feature = "select")]
-use crate::select::{Token, SelectorSignal};
+use crate::select::Token;
 #[cfg(feature = "async")]
 use crate::r#async::RecvFuture;
 
@@ -72,6 +72,54 @@ pub enum RecvTimeoutError {
     Disconnected,
 }
 
+#[derive(Default)]
+struct Signal<T: Copy = ()> {
+    lock: Mutex<(usize, T)>,
+    trigger: Condvar,
+}
+
+impl<T: Copy> Signal<T> {
+    fn wait<G>(&self, sync_guard: G) -> T {
+        let mut guard = self.lock.lock().unwrap();
+        drop(sync_guard);
+        guard.0 += 1;
+        let mut guard = self.trigger.wait(guard).unwrap();
+        guard.0 -= 1;
+        guard.1
+    }
+
+    fn wait_timeout<G>(&self, dur: Duration, sync_guard: G) -> (T, WaitTimeoutResult) {
+        let mut guard = self.lock.lock().unwrap();
+        drop(sync_guard);
+        guard.0 += 1;
+        let (mut guard, timeout) = self.trigger.wait_timeout(guard, dur).unwrap();
+        guard.0 -= 1;
+        (guard.1, timeout)
+    }
+
+    fn notify_one(&self) {
+        let guard = self.lock.lock().unwrap();
+        if guard.0 > 0 {
+            self.trigger.notify_one();
+        }
+    }
+
+    fn notify_one_with(&self, item: T) {
+        let mut guard = self.lock.lock().unwrap();
+        guard.1 = item;
+        if guard.0 > 0 {
+            self.trigger.notify_one();
+        }
+    }
+
+    fn notify_all(&self) {
+        let guard = self.lock.lock().unwrap();
+        if guard.0 > 0 {
+            self.trigger.notify_all();
+        }
+    }
+}
+
 /// Wrapper around a queue. This wrapper exists to permit a maximum length.
 struct Queue<T>(VecDeque<T>, Option<usize>);
 
@@ -79,8 +127,6 @@ impl<T> Queue<T> {
     fn new(cap: Option<usize>) -> Self { Self(VecDeque::new(), cap) }
 
     fn len(&self) -> usize { self.0.len() }
-
-    fn is_bounded(&self) -> bool { self.1.is_some() }
 
     fn push(&mut self, x: T) -> Option<T> {
         if Some(self.0.len()) == self.1 {
@@ -99,7 +145,7 @@ impl<T> Queue<T> {
         // TODO: Swapping on bounded queues doesn't work correctly since it gives senders a false
         // impression of how many items are in the queue, allowing them to push too many items into
         // the queue
-        if !self.is_bounded() {
+        if !self.1.is_some() {
             std::mem::swap(&mut self.0, buf);
         }
     }
@@ -117,10 +163,10 @@ struct Inner<T> {
     send_selector_counter: usize,
     /// Used to waken sender selectors
     #[cfg(feature = "select")]
-    send_selectors: Vec<(usize, Arc<SelectorSignal>, Token)>,
+    send_selectors: Vec<(usize, Arc<Signal<Token>>, Token)>,
     /// Used to waken a receiver selector
     #[cfg(feature = "select")]
-    recv_selector: Option<(Arc<SelectorSignal>, Token)>,
+    recv_selector: Option<(Arc<Signal<Token>>, Token)>,
     /// Used to waken an async receiver task
     #[cfg(feature = "async")]
     recv_waker: Option<Waker>,
@@ -140,13 +186,11 @@ struct Inner<T> {
 struct Shared<T> {
     // Mutable state
     inner: InnerMutex<Inner<T>>,
-    /// Mutexed used for locking condvars.
-    wait_lock: Mutex<()>,
     /// Used for notifying the receiver about incoming messages.
-    send_trigger: Condvar,
+    send_signal: Signal,
     // Used for notifying senders about the queue no longer being full. Therefore, this is only a
     // `Some` for bounded queues.
-    recv_trigger: Option<Condvar>,
+    recv_signal: Option<Signal>,
 }
 
 impl<T> Shared<T> {
@@ -169,9 +213,8 @@ impl<T> Shared<T> {
                 send_waiters: 0,
                 listen_mode: 1,
             }),
-            wait_lock: Mutex::new(()),
-            send_trigger: Condvar::new(),
-            recv_trigger: None,
+            send_signal: Signal::default(),
+            recv_signal: if cap.is_some() { Some(Signal::default()) } else { None },
         }
     }
 
@@ -249,18 +292,9 @@ impl<T> Shared<T> {
             {
                 // Notify the receiving selector
                 if let Some((signal, token)) = &inner.recv_selector {
-                    let mut guard = signal.wait_lock.lock().unwrap();
-                    // TODO: Can we get away with not having this here? Seems like it
-                    //drop(inner); // Avoid a deadlock
-                    *guard = Some(*token);
-                    signal.trigger.notify_one();
+                    signal.notify_one_with(*token);
                     return Ok(());
                 }
-            }
-
-            // If nothing is listening, exit early
-            if inner.listen_mode < 2 {
-                return Ok(());
             }
 
             // TODO: Have a different listen mode for async vs sync receivers?
@@ -272,10 +306,9 @@ impl<T> Shared<T> {
                 }
             }
 
+            drop(inner);
             // Notify the receiver of a new message
-            drop(inner); // Avoid a deadlock
-            let _ = self.wait_lock.lock().unwrap();
-            self.send_trigger.notify_one();
+            self.send_signal.notify_one();
 
             Ok(())
         })
@@ -285,7 +318,7 @@ impl<T> Shared<T> {
     fn send(&self, mut msg: T) -> Result<(), SendError<T>> {
         loop {
             // Attempt to send a message
-            let mut inner = match self.try_send(msg) {
+            let inner = match self.try_send(msg) {
                 Ok(()) => return Ok(()),
                 Err((_, TrySendError::Disconnected(msg))) => return Err(SendError(msg)),
                 Err((inner, TrySendError::Full(m))) => {
@@ -294,17 +327,9 @@ impl<T> Shared<T> {
                 },
             };
 
-            if let Some(recv_trigger) = self.recv_trigger.as_ref() {
-                // Take a guard of the main lock to use later when waiting
-                let guard = self.wait_lock.lock().unwrap();
-                // Inform the receiver that we need waking
-                inner.send_waiters += 1;
-                // We keep the queue alive until here to avoid a deadlock
-                drop(inner);
+            if let Some(recv_signal) = self.recv_signal.as_ref() {
                 // Wait until we get a signal that suggests the queue might have space
-                let _ = recv_trigger.wait(guard).unwrap();
-                // Inform the receiver that we no longer need waking
-                self.with_inner(|mut inner| inner.send_waiters -= 1);
+                recv_signal.wait(inner);
             }
         }
     }
@@ -312,8 +337,7 @@ impl<T> Shared<T> {
     /// Inform the receiver that all senders have been dropped
     #[inline]
     fn all_senders_disconnected(&self) {
-        let _ = self.wait_lock.lock().unwrap();
-        self.send_trigger.notify_all(); // TODO: notify_one instead? Which is faster?
+        self.send_signal.notify_all();
         #[cfg(feature = "async")]
         {
             if let Some(recv_waker) = &self.lock_inner().recv_waker {
@@ -324,9 +348,8 @@ impl<T> Shared<T> {
 
     #[inline]
     fn receiver_disconnected(&self) {
-        if let Some(recv_trigger) = self.recv_trigger.as_ref() {
-            let _ = self.wait_lock.lock().unwrap();
-            recv_trigger.notify_all();
+        if let Some(recv_signal) = self.recv_signal.as_ref() {
+            recv_signal.notify_all();
         }
     }
 
@@ -366,19 +389,15 @@ impl<T> Shared<T> {
                 .send_selectors
                 .iter()
                 .for_each(|(_, signal, token)| {
-                    let mut guard = signal.wait_lock.lock().unwrap();
-                    *guard = Some(*token);
-                    signal.trigger.notify_one();
+                    signal.notify_one_with(*token);
                 });
         }
 
         // If there are senders waiting for a message, wake them up.
-        if let Some(recv_trigger) = self.recv_trigger.as_ref() {
-            if inner.queue.is_bounded() && inner.send_waiters > 0 {
-                drop(inner);
-                let _ = self.wait_lock.lock().unwrap();
-                recv_trigger.notify_one();
-            }
+        if let Some(recv_signal) = self.recv_signal.as_ref() {
+            drop(inner);
+            // Notify the receiver of a new message
+            recv_signal.notify_one();
         }
 
         Ok(msg)
@@ -392,7 +411,7 @@ impl<T> Shared<T> {
         loop {
             // Attempt to receive a message
             let mut i = 0;
-            let mut inner = loop {
+            let inner = loop {
                 match self.try_recv(|| self.wait_inner(), buf) {
                     Ok(msg) => return Ok(msg),
                     Err((_, TryRecvError::Disconnected)) => return Err(RecvError::Disconnected),
@@ -403,16 +422,8 @@ impl<T> Shared<T> {
                 i += 1;
             };
 
-            // Take a guard of the main lock to use later when waiting
-            let guard = self.wait_lock.lock().unwrap();
-            // Inform the sender that we need waking
-            inner.listen_mode = 2;
-            // We keep the queue alive until here to avoid a deadlock
-            drop(inner);
             // Wait until we get a signal that the queue has new messages
-            let _ = self.send_trigger.wait(guard).unwrap();
-            // Inform the sender that we no longer need waking
-            self.with_inner(|mut inner| inner.listen_mode = 1);
+            self.send_signal.wait(inner);
         }
     }
 
@@ -424,16 +435,13 @@ impl<T> Shared<T> {
         buf: &mut VecDeque<T>,
     ) -> Result<T, RecvTimeoutError> {
         // Attempt a speculative recv. If we are lucky there might be a message in the queue!
-        if let Ok(msg) = self.try_recv(|| self.wait_inner(), buf) {
-            return Ok(msg);
-        }
+        let mut inner = match self.try_recv(|| self.wait_inner(), buf) {
+            Ok(msg) => return Ok(msg),
+            Err((_, TryRecvError::Disconnected)) => return Err(RecvTimeoutError::Disconnected),
+            Err((inner, TryRecvError::Empty)) => inner,
+        };
 
-        // Inform senders that we're going into a listening period and need to be notified of new
-        // messages.
-        self.with_inner(|mut inner| inner.listen_mode = 2);
-
-        let mut guard = self.wait_lock.lock().unwrap();
-        let result = loop {
+        loop {
             // TODO: Instant::now() is expensive, find a better way to do this
             let now = Instant::now();
             let timeout = if now >= deadline {
@@ -446,28 +454,24 @@ impl<T> Shared<T> {
 
             // Wait for the given timeout (or, at least, try to - this may complete before the
             // timeout due to spurious wakeup events).
-            let (nguard, timeout) = self.send_trigger.wait_timeout(guard, timeout).unwrap();
-            guard = nguard;
+            let timeout = self.send_signal.wait_timeout(timeout, inner).1;
             if timeout.timed_out() {
                 // This was a timeout rather than a wakeup, so produce a timeout error.
                 break Err(RecvTimeoutError::Timeout);
             }
 
             // Attempt to receive a message from the queue
-            match self.try_recv(|| self.wait_inner(), buf) {
-                Ok(msg) => break Ok(msg),
-                Err((_, TryRecvError::Empty)) => {},
-                Err((_, TryRecvError::Disconnected)) => break Err(RecvTimeoutError::Disconnected),
-            }
-        };
-        // Ensure the listen mode is reset
-        self.with_inner(|mut inner| inner.listen_mode = 1);
-        result
+            inner = match self.try_recv(|| self.wait_inner(), buf) {
+                Ok(msg) => return Ok(msg),
+                Err((inner, TryRecvError::Empty)) => inner,
+                Err((_, TryRecvError::Disconnected)) => return Err(RecvTimeoutError::Disconnected),
+            };
+        }
     }
 
     #[cfg(feature = "select")]
     #[inline]
-    fn connect_send_selector(&self, signal: Arc<SelectorSignal>, token: Token) -> usize {
+    fn connect_send_selector(&self, signal: Arc<Signal<Token>>, token: Token) -> usize {
         let mut inner = self.lock_inner();
         inner.send_selector_counter += 1;
         let id = inner.send_selector_counter;
@@ -483,7 +487,7 @@ impl<T> Shared<T> {
 
     #[cfg(feature = "select")]
     #[inline]
-    fn connect_recv_selector(&self, signal: Arc<SelectorSignal>, token: Token) {
+    fn connect_recv_selector(&self, signal: Arc<Signal<Token>>, token: Token) {
         self.lock_inner().recv_selector = Some((signal, token));
     }
 
