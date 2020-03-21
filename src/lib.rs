@@ -222,7 +222,7 @@ impl<T> Shared<T> {
     #[inline]
     #[cfg(windows)]
     fn wait_inner(&self) -> MutexGuard<'_, Inner<T>> {
-        self.lock_inner().unwrap()
+        self.lock_inner()
     }
 
     #[inline]
