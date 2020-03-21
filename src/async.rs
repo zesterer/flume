@@ -6,7 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 use crate::*;
-use futures::Stream;
+use futures::{Stream, stream::FusedStream, future::FusedFuture};
 
 impl<T> Receiver<T> {
     #[inline]
@@ -69,6 +69,12 @@ impl<'a, T> Future for RecvFuture<'a, T> {
     }
 }
 
+impl<'a, T> FusedFuture for RecvFuture<'a, T> {
+    fn is_terminated(&self) -> bool {
+        self.recv.shared.is_disconnected()
+    }
+}
+
 impl<T> Stream for Receiver<T> {
     type Item = T;
 
@@ -78,5 +84,11 @@ impl<T> Stream for Receiver<T> {
     
     fn size_hint(&self) -> (usize, Option<usize>) {
 	    (self.buffer.borrow().len(), None)
+    }
+}
+
+impl<T> FusedStream for Receiver<T> {
+    fn is_terminated(&self) -> bool {
+        self.shared.is_disconnected()
     }
 }

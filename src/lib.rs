@@ -25,6 +25,7 @@ pub use select::Selector;
 use std::{
     collections::VecDeque,
     sync::{Arc, Condvar, Mutex},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
     cell::{UnsafeCell, RefCell},
     marker::PhantomData,
@@ -142,6 +143,7 @@ struct Shared<T> {
     // Used for notifying senders about the queue no longer being full. Therefore, this is only a
     // `Some` for bounded queues.
     recv_trigger: Option<Condvar>,
+    disconnected: AtomicBool,
 }
 
 impl<T> Shared<T> {
@@ -167,7 +169,13 @@ impl<T> Shared<T> {
             wait_lock: Mutex::new(()),
             send_trigger: Condvar::new(),
             recv_trigger: None,
+            disconnected: AtomicBool::new(false),
         }
+    }
+    
+    #[inline]
+    fn is_disconnected(&self) -> bool {
+        self.disconnected.load(Ordering::Acquire)
     }
 
     #[inline]
@@ -295,6 +303,8 @@ impl<T> Shared<T> {
                 recv_waker.wake_by_ref();
             }
         }
+        
+        self.disconnected.store(true, Ordering::Release);
     }
 
     #[inline]
