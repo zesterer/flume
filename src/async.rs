@@ -75,4 +75,8 @@ impl<T> Stream for Receiver<T> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.poll(cx).map(|ready| ready.ok())
     }
+    
+    fn size_hint(&self) -> (usize, Option<usize>) {
+	    (self.buffer.borrow().len(), None)
+    }
 }
