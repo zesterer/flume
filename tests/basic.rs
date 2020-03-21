@@ -157,14 +157,14 @@ fn send_bounded() {
 fn rendezvous() {
     let (tx, rx) = bounded(0);
 
-    for i in 0..10 {
+    for i in 0..20 {
         let tx = tx.clone();
         let t = std::thread::spawn(move || {
             let then = Instant::now();
             tx.send(()).unwrap();
             let now = Instant::now();
 
-            assert!(now.duration_since(then) > Duration::from_millis(240), "iter = {}", i);
+            assert!(now.duration_since(then) > Duration::from_millis(50), "iter = {}", i);
         });
 
         std::thread::sleep(Duration::from_millis(250));
