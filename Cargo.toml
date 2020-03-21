@@ -12,11 +12,12 @@ readme = "README.md"
 
 [features]
 select = []
-async = []
+async = ["futures"]
 default = ["select", "async"]
 
 [dependencies]
 spin = "0.5"
+futures = { version = "^0.3", default-features = false, optional = true }
 
 [dev-dependencies]
 crossbeam-channel = "0.4"
