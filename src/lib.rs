@@ -315,7 +315,8 @@ impl<T> Shared<T> {
             let inner = match self.try_send(msg) {
                 Ok(Some(inner)) => {
                     // Rendezvous
-                    self.rendezvous_signal.as_ref().unwrap().wait_while(inner, false, |taken| !*taken);
+                    let sig = self.rendezvous_signal.as_ref().unwrap();
+                    sig.wait_while(inner, false, |taken| !*taken);
                     return Ok(());
                 },
                 Ok(None) => return Ok(()),
@@ -365,7 +366,7 @@ impl<T> Shared<T> {
     ) -> Result<T, (MutexGuard<Inner<T>>, TryRecvError)> {
         // Eagerly check the buffer
         if let Some(msg) = buf.pop_front() {
-            return Ok(msg)
+            return Ok(msg);
         }
 
         let mut inner = take_inner();
