@@ -160,6 +160,8 @@ fn rendezvous() {
     for i in 0..20 {
         let tx = tx.clone();
         let t = std::thread::spawn(move || {
+            assert!(tx.try_send(()).is_err());
+
             let then = Instant::now();
             tx.send(()).unwrap();
             let now = Instant::now();

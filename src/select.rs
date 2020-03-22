@@ -105,7 +105,7 @@ impl<'a, T> Selector<'a, T> {
         loop {
             // Wait for a token to become active
             // TODO: Currently, all awaits produce a token
-            let token = Some(self.signal.wait(()));
+            let token = Some(self.signal.wait_then((), |t| *t));
 
             // Attempt to receive a message
             if let Some(msg) = match token {
