@@ -357,7 +357,7 @@ impl<T> Shared<T> {
         &'a self,
         take_inner: impl FnOnce() -> MutexGuard<'a, Inner<T>>,
         buf: &mut VecDeque<T>,
-        mode: &Cell<ReceiverMode>,
+        mode: &Cell<Mode>,
     ) -> Result<T, (MutexGuard<Inner<T>>, TryRecvError)> {
         // Eagerly check the buffer
         if let Some(msg) = buf.pop_front() {
@@ -376,7 +376,7 @@ impl<T> Shared<T> {
             },
             // If there's nothing more in the queue, this might be because there are no senders
             None if inner.sender_count == 0 => {
-                mode.set(ReceiverMode::Finished);
+                mode.set(Mode::Finished);
                 return Err((inner, TryRecvError::Disconnected));
             },
             None => return Err((inner, TryRecvError::Empty)),
@@ -387,7 +387,7 @@ impl<T> Shared<T> {
         // impression of how many items are in the queue, allowing them to push too many items into
         // the queue
         // Also, swapping when there is more than one receiver is also not permitted
-        if !inner.queue.is_bounded() && mode.get() != ReceiverMode::Multiple {
+        if !inner.queue.is_bounded() && mode.get() != Mode::Multiple {
             inner.queue.swap(buf);
         }
 
@@ -415,7 +415,7 @@ impl<T> Shared<T> {
     fn recv(
         &self,
         buf: &mut VecDeque<T>,
-        mode: &Cell<ReceiverMode>,
+        mode: &Cell<Mode>,
     ) -> Result<T, RecvError> {
         loop {
             // Attempt to receive a message
@@ -442,7 +442,7 @@ impl<T> Shared<T> {
         &self,
         deadline: Instant,
         buf: &mut VecDeque<T>,
-        mode: &Cell<ReceiverMode>
+        mode: &Cell<Mode>
     ) -> Result<T, RecvTimeoutError> {
         // Attempt a speculative recv. If we are lucky there might be a message in the queue!
         let mut inner = match self.try_recv(|| self.wait_inner(), buf, mode) {
@@ -554,7 +554,7 @@ impl<T> Drop for Sender<T> {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
-enum ReceiverMode {
+enum Mode {
     /// MPSC channel
     Single,
     /// MPMC channel
@@ -566,7 +566,7 @@ enum ReceiverMode {
 /// The receiving end of a channel.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
-    mode: Cell<ReceiverMode>,
+    mode: Cell<Mode>,
     /// Buffer for messages (only uses when mpmc_mode is false)
     buffer: RefCell<VecDeque<T>>,
 }
@@ -655,7 +655,7 @@ impl<T> Clone for Receiver<T> {
     /// receiver *does not* turn enable message broadcasting.
     fn clone(&self) -> Self {
         let new_mode = match self.mode.get() {
-            ReceiverMode::Single => ReceiverMode::Multiple,
+            Mode::Single => Mode::Multiple,
             old => old,
         };
 
@@ -771,7 +771,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
         Sender { shared: shared.clone() },
         Receiver {
             shared,
-            mode: Cell::new(ReceiverMode::Single),
+            mode: Cell::new(Mode::Single),
             buffer: RefCell::new(VecDeque::new()),
         },
     )
@@ -805,7 +805,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
         Sender { shared: shared.clone() },
         Receiver {
             shared,
-            mode: Cell::new(ReceiverMode::Single),
+            mode: Cell::new(Mode::Single),
             buffer: RefCell::new(VecDeque::new()),
         },
     )

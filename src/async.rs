@@ -69,7 +69,7 @@ impl<'a, T> Future for RecvFuture<'a, T> {
 
 impl<'a, T> FusedFuture for RecvFuture<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.recv.mode.get() == ReceiverMode::Finished
+        self.recv.mode.get() == Mode::Finished
     }
 }
 
@@ -87,6 +87,6 @@ impl<T> Stream for Receiver<T> {
 
 impl<T> FusedStream for Receiver<T> {
     fn is_terminated(&self) -> bool {
-        self.mode.get() == ReceiverMode::Finished
+        self.mode.get() == Mode::Finished
     }
 }
