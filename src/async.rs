@@ -24,8 +24,7 @@ impl<T> Receiver<T> {
                     .try_recv(
                         move || inner,
                         &mut buf,
-                        &self.finished,
-                        self.mpmc_mode.get(),
+                        &self.mode,
                     )
                 )
         };
@@ -70,7 +69,7 @@ impl<'a, T> Future for RecvFuture<'a, T> {
 
 impl<'a, T> FusedFuture for RecvFuture<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.recv.finished.get()
+        self.recv.mode.get() == ReceiverMode::Finished
     }
 }
 
@@ -88,6 +87,6 @@ impl<T> Stream for Receiver<T> {
 
 impl<T> FusedStream for Receiver<T> {
     fn is_terminated(&self) -> bool {
-        self.finished.get()
+        self.mode.get() == ReceiverMode::Finished
     }
 }
