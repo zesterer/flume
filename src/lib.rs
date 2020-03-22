@@ -179,7 +179,7 @@ struct Inner<T> {
     recv_selector: Option<(Arc<Signal<Token>>, Token)>,
     /// Used to waken an async receiver task
     #[cfg(feature = "async")]
-    recv_waker: Option<Waker>,
+    recv_wakers: VecDeque<Waker>,
     /// The number of senders associated with this channel. If this drops to 0, the channel is
     /// 'dead' and the listener will begin reporting disconnect errors (once the queue has been
     /// drained).
@@ -212,7 +212,7 @@ impl<T> Shared<T> {
                 recv_selector: None,
 
                 #[cfg(feature = "async")]
-                recv_waker: None,
+                recv_wakers: VecDeque::new(),
 
                 sender_count: 1,
                 receiver_count: 1,
@@ -284,9 +284,8 @@ impl<T> Shared<T> {
         #[cfg(feature = "async")]
         {
             // Notify the receiving async task
-            if let Some(recv_waker) = &inner.recv_waker {
+            if let Some(recv_waker) = inner.recv_wakers.pop_front() {
                 recv_waker.wake_by_ref();
-                inner.recv_waker = None;
             }
         }
 
@@ -334,9 +333,8 @@ impl<T> Shared<T> {
         #[cfg(feature = "async")]
         {
             let mut inner = self.lock_inner();
-            if let Some(recv_waker) = &inner.recv_waker {
+            if let Some(recv_waker) = inner.recv_wakers.pop_front() {
                 recv_waker.wake_by_ref();
-                inner.recv_waker = None;
             }
         }
     }
