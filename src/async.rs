@@ -21,13 +21,18 @@ impl<T> Receiver<T> {
                 .poll_inner()
                 .map(|mut inner| self
                     .shared
-                    .try_recv(move || {
-                        // Detach the waker
-                        inner.recv_waker = None;
-                        // Inform the sender that we no longer need waking
-                        inner.listen_mode = 1;
-                        inner
-                    }, &mut buf))
+                    .try_recv(
+                        move || {
+                            // Detach the waker
+                            inner.recv_waker = None;
+                            // Inform the sender that we no longer need waking
+                            inner.listen_mode = 1;
+                            inner
+                        },
+                        &mut buf,
+                        &self.finished,
+                    )
+                )
         };
 
         let poll = match res {
@@ -71,7 +76,7 @@ impl<'a, T> Future for RecvFuture<'a, T> {
 
 impl<'a, T> FusedFuture for RecvFuture<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.recv.shared.is_disconnected()
+        self.recv.finished.get()
     }
 }
 
@@ -89,6 +94,6 @@ impl<T> Stream for Receiver<T> {
 
 impl<T> FusedStream for Receiver<T> {
     fn is_terminated(&self) -> bool {
-        self.shared.is_disconnected()
+        self.finished.get()
     }
 }
