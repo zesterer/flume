@@ -89,12 +89,12 @@ impl<T> Signal<T> {
         self.waiters.fetch_sub(1, Ordering::Relaxed);
     }
 
-    fn wait_while<G>(&self, sync_guard: G, initial: T, f: impl FnMut(&mut T) -> bool) {
+    fn do_then_wait_while<G>(&self, sync_guard: G, first: impl FnOnce(&mut T), cond: impl FnMut(&mut T) -> bool) {
         let mut guard = self.lock.lock().unwrap();
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
-        *guard = initial;
-        let guard = self.trigger.wait_while(guard, f).unwrap();
+        first(&mut *guard);
+        let guard = self.trigger.wait_while(guard, cond).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
     }
 
@@ -319,9 +319,11 @@ impl<T> Shared<T> {
                 Ok(()) => return Ok(()),
                 Err((_, TrySendError::Disconnected(msg))) => return Err(SendError(msg)),
                 Err((inner, TrySendError::Full(m))) => if let Some(sig) = self.rendezvous_signal.as_ref() {
-                    // Notify the receiver of a new rendezvous message
-                    self.send_signal.notify_one(());
-                    sig.wait_while(inner, Some(m), |msg| msg.is_some());
+                    sig.do_then_wait_while(inner, |msg| {
+                        *msg = Some(m);
+                        // Notify the receiver of a new rendezvous message
+                        self.send_signal.notify_one(());
+                    }, |msg| msg.is_some());
                     return Ok(());
                 } else {
                     msg = m;
