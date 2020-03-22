@@ -41,6 +41,7 @@ use std::task::Waker;
 use crate::select::Token;
 #[cfg(feature = "async")]
 use crate::r#async::RecvFuture;
+use std::cell::Cell;
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -260,6 +261,7 @@ impl<T> Shared<T> {
     }
 
     #[inline]
+    #[cfg(feature = "async")]
     fn poll_inner(&self) -> Option<MutexGuard<'_, Inner<T>>> {
         #[cfg(windows)] { self.inner.try_lock().ok() }
         #[cfg(not(windows))] { self.inner.try_lock() }
@@ -363,6 +365,7 @@ impl<T> Shared<T> {
         &'a self,
         take_inner: impl FnOnce() -> MutexGuard<'a, Inner<T>>,
         buf: &mut VecDeque<T>,
+        finished: &Cell<bool>,
     ) -> Result<T, (MutexGuard<Inner<T>>, TryRecvError)> {
         // Eagerly check the buffer
         if let Some(msg) = buf.pop_front() {
@@ -380,8 +383,10 @@ impl<T> Shared<T> {
                 msg
             },
             // If there's nothing more in the queue, this might be because there are no senders
-            None if inner.sender_count == 0 =>
-                return Err((inner, TryRecvError::Disconnected)),
+            None if inner.sender_count == 0 => {
+                finished.set(true);
+                return Err((inner, TryRecvError::Disconnected));
+            },
             None => return Err((inner, TryRecvError::Empty)),
         };
 
@@ -412,12 +417,13 @@ impl<T> Shared<T> {
     fn recv(
         &self,
         buf: &mut VecDeque<T>,
+        finished: &Cell<bool>,
     ) -> Result<T, RecvError> {
         loop {
             // Attempt to receive a message
             let mut i = 0;
             let inner = loop {
-                match self.try_recv(|| self.wait_inner(), buf) {
+                match self.try_recv(|| self.wait_inner(), buf, finished) {
                     Ok(msg) => return Ok(msg),
                     Err((_, TryRecvError::Disconnected)) => return Err(RecvError::Disconnected),
                     Err((inner, TryRecvError::Empty)) if i == 3 => break inner,
@@ -438,9 +444,10 @@ impl<T> Shared<T> {
         &self,
         deadline: Instant,
         buf: &mut VecDeque<T>,
+        finished: &Cell<bool>,
     ) -> Result<T, RecvTimeoutError> {
         // Attempt a speculative recv. If we are lucky there might be a message in the queue!
-        let mut inner = match self.try_recv(|| self.wait_inner(), buf) {
+        let mut inner = match self.try_recv(|| self.wait_inner(), buf, finished) {
             Ok(msg) => return Ok(msg),
             Err((_, TryRecvError::Disconnected)) => return Err(RecvTimeoutError::Disconnected),
             Err((inner, TryRecvError::Empty)) => inner,
@@ -466,7 +473,7 @@ impl<T> Shared<T> {
             }
 
             // Attempt to receive a message from the queue
-            inner = match self.try_recv(|| self.wait_inner(), buf) {
+            inner = match self.try_recv(|| self.wait_inner(), buf, finished) {
                 Ok(msg) => return Ok(msg),
                 Err((inner, TryRecvError::Empty)) => inner,
                 Err((_, TryRecvError::Disconnected)) => return Err(RecvTimeoutError::Disconnected),
@@ -555,13 +562,15 @@ pub struct Receiver<T> {
     /// Used to prevent Sync being implemented for this type - we never actually use it!
     /// TODO: impl<T> !Sync for Receiver<T> {} when negative traits are stable
     _phantom_cell: UnsafeCell<()>,
+    /// Whether all receivers have disconnected and there are no messages in any buffer
+    finished: Cell<bool>,
 }
 
 impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.shared.recv(&mut self.buffer.borrow_mut())
+        self.shared.recv(&mut self.buffer.borrow_mut(), &self.finished)
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
@@ -569,14 +578,19 @@ impl<T> Receiver<T> {
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
         self.shared.recv_deadline(
             Instant::now().checked_add(timeout).unwrap(),
-            &mut self.buffer.borrow_mut()
+            &mut self.buffer.borrow_mut(),
+            &self.finished
         )
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        self.shared.recv_deadline(deadline, &mut self.buffer.borrow_mut())
+        self.shared.recv_deadline(
+            deadline,
+            &mut self.buffer.borrow_mut(),
+            &self.finished
+        )
     }
 
     // Takes `&mut self` to avoid >1 task waiting on this channel
@@ -593,7 +607,11 @@ impl<T> Receiver<T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self
             .shared
-            .try_recv(|| self.shared.wait_inner(), &mut self.buffer.borrow_mut())
+            .try_recv(
+                || self.shared.wait_inner(),
+                &mut self.buffer.borrow_mut(),
+                &self.finished
+            )
             .map_err(|(_, err)| err)
     }
 
@@ -716,6 +734,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
         Receiver {
             shared,
             buffer: RefCell::new(VecDeque::new()),
+            finished: Cell::new(false),
             _phantom_cell: UnsafeCell::new(())
         },
     )
@@ -750,6 +769,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
         Receiver {
             shared,
             buffer: RefCell::new(VecDeque::new()),
+            finished: Cell::new(false),
             _phantom_cell: UnsafeCell::new(())
         },
     )

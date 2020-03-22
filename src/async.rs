@@ -6,43 +6,33 @@ use std::{
     task::{Context, Poll},
 };
 use crate::*;
+use futures::{Stream, stream::FusedStream, future::FusedFuture};
 
-/// A future  used to receive a value from the channel.
-pub struct RecvFuture<'a, T> {
-    recv: &'a mut Receiver<T>,
-}
-
-impl<'a, T> RecvFuture<'a, T> {
-    pub(crate) fn new(recv: &mut Receiver<T>) -> RecvFuture<T> {
-        RecvFuture { recv }
-    }
-}
-
-impl<'a, T> Future for RecvFuture<'a, T> {
-    type Output = Result<T, RecvError>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // On success, set the waker to none to avoid it being woken again in case that is wrong
-        // TODO: `poll_recv` instead to prevent even spinning?
-        let mut buf = self.recv.buffer.borrow_mut();
+impl<T> Receiver<T> {
+    #[inline]
+    fn poll(&self, cx: &mut Context<'_>) -> Poll<Result<T, RecvError>> {
+        let mut buf = self.buffer.borrow_mut();
 
         let res = if let Some(msg) = buf.pop_front() {
             return Poll::Ready(Ok(msg));
         } else {
             self
-                .recv
                 .shared
                 .poll_inner()
                 .map(|mut inner| self
-                    .recv
                     .shared
-                    .try_recv(move || {
-                        // Detach the waker
-                        inner.recv_waker = None;
-                        // Inform the sender that we no longer need waking
-                        inner.listen_mode = 1;
-                        inner
-                    }, &mut buf))
+                    .try_recv(
+                        move || {
+                            // Detach the waker
+                            inner.recv_waker = None;
+                            // Inform the sender that we no longer need waking
+                            inner.listen_mode = 1;
+                            inner
+                        },
+                        &mut buf,
+                        &self.finished,
+                    )
+                )
         };
 
         let poll = match res {
@@ -62,5 +52,48 @@ impl<'a, T> Future for RecvFuture<'a, T> {
         };
 
         poll
+    }
+}
+
+/// A future  used to receive a value from the channel.
+pub struct RecvFuture<'a, T> {
+    recv: &'a mut Receiver<T>,
+}
+
+impl<'a, T> RecvFuture<'a, T> {
+    pub(crate) fn new(recv: &mut Receiver<T>) -> RecvFuture<T> {
+        RecvFuture { recv }
+    }
+}
+
+impl<'a, T> Future for RecvFuture<'a, T> {
+    type Output = Result<T, RecvError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.recv.poll(cx)
+    }
+}
+
+impl<'a, T> FusedFuture for RecvFuture<'a, T> {
+    fn is_terminated(&self) -> bool {
+        self.recv.finished.get()
+    }
+}
+
+impl<T> Stream for Receiver<T> {
+    type Item = T;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.poll(cx).map(|ready| ready.ok())
+    }
+    
+    fn size_hint(&self) -> (usize, Option<usize>) {
+	    (self.buffer.borrow().len(), None)
+    }
+}
+
+impl<T> FusedStream for Receiver<T> {
+    fn is_terminated(&self) -> bool {
+        self.finished.get()
     }
 }
