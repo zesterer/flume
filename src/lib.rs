@@ -302,23 +302,47 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn send(&self, mut msg: T) -> Result<(), SendError<T>> {
+    fn send(&self, mut msg: T, mode: &Cell<Mode>) -> Result<(), SendError<T>> {
         loop {
             // Attempt to send a message
-            let inner = match self.try_send(msg) {
-                Ok(Some(inner)) => {
-                    // Rendezvous
-                    let sig = self.rendezvous_signal.as_ref().unwrap();
-                    sig.wait_while(inner, false, |taken| !*taken);
-                    return Ok(());
-                },
-                Ok(None) => return Ok(()),
-                Err((_, TrySendError::Disconnected(msg))) => return Err(SendError(msg)),
-                Err((inner, TrySendError::Full(m))) => {
-                    msg = m;
-                    inner
-                },
+            let mut i = 0;
+            let inner = loop {
+                match self.try_send(msg) {
+                    Ok(Some(inner)) => {
+                        // Rendezvous
+                        let sig = self.rendezvous_signal.as_ref().unwrap();
+                        sig.wait_while(inner, false, |taken| !*taken);
+                        return Ok(());
+                    },
+                    Ok(None) => return Ok(()),
+                    Err((_, TrySendError::Disconnected(msg))) => return Err(SendError(msg)),
+                    Err((inner, TrySendError::Full(m))) if i == 3 || mode.get() == Mode::Multiple => {
+                        msg = m;
+                        break inner;
+                    },
+                    Err((inner, TrySendError::Full(m))) => {
+                        msg = m;
+                    },
+                }
+                thread::yield_now();
+                i += 1;
             };
+
+
+            // let inner = match self.try_send(msg) {
+            //     Ok(Some(inner)) => {
+            //         // Rendezvous
+            //         let sig = self.rendezvous_signal.as_ref().unwrap();
+            //         sig.wait_while(inner, false, |taken| !*taken);
+            //         return Ok(());
+            //     },
+            //     Ok(None) => return Ok(()),
+            //     Err((_, TrySendError::Disconnected(msg))) => return Err(SendError(msg)),
+            //     Err((inner, TrySendError::Full(m))) => {
+            //         msg = m;
+            //         inner
+            //     },
+            // };
 
             if let Some(recv_signal) = self.recv_signal.as_ref() {
                 // Wait until we get a signal that suggests the queue might have space
@@ -424,7 +448,7 @@ impl<T> Shared<T> {
                 match self.try_recv(|| self.wait_inner(), buf, mode) {
                     Ok(msg) => return Ok(msg),
                     Err((_, TryRecvError::Disconnected)) => return Err(RecvError::Disconnected),
-                    Err((inner, TryRecvError::Empty)) if i == 3 => break inner,
+                    Err((inner, TryRecvError::Empty)) if i == 3 || mode.get() == Mode::Multiple => break inner,
                     Err((_, TryRecvError::Empty)) => {},
                 };
                 thread::yield_now();
@@ -511,13 +535,14 @@ impl<T> Shared<T> {
 /// A transmitting end of a channel.
 pub struct Sender<T> {
     shared: Arc<Shared<T>>,
+    mode: Cell<Mode>,
 }
 
 impl<T> Sender<T> {
     /// Send a value into the channel, returning an error if the channel receiver has
     /// been dropped. If the channel is bounded and is full, this method will block.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        self.shared.send(msg)
+        self.shared.send(msg, &self.mode)
     }
 
     /// Attempt to send a value into the channel. If the channel is bounded and full, or the
@@ -532,9 +557,16 @@ impl<T> Clone for Sender<T> {
     /// Clone this sender. [`Sender`] acts as a handle to a channel, and the channel will only be
     /// cleaned up when all senders and the receiver have been dropped.
     fn clone(&self) -> Self {
+        let new_mode = match self.mode.get() {
+            Mode::Single => Mode::Multiple,
+            old => old,
+        };
+
+        self.mode.set(new_mode);
+
         self.shared.wait_inner().sender_count += 1;
         //self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
-        Self { shared: self.shared.clone() }
+        Self { shared: self.shared.clone(), mode: Cell::new(new_mode) }
     }
 }
 
@@ -768,7 +800,7 @@ impl<T> Iterator for IntoIter<T> {
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(None));
     (
-        Sender { shared: shared.clone() },
+        Sender { shared: shared.clone(), mode: Cell::new(Mode::Single) },
         Receiver {
             shared,
             mode: Cell::new(Mode::Single),
@@ -802,7 +834,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(Some(cap)));
     (
-        Sender { shared: shared.clone() },
+        Sender { shared: shared.clone(), mode: Cell::new(Mode::Single) },
         Receiver {
             shared,
             mode: Cell::new(Mode::Single),

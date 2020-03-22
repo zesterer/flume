@@ -282,6 +282,12 @@ fn inout(b: &mut Criterion) {
     b.bench_function("inout-std", |b| test_inout::<mpsc::Sender<u32>>(b));
 }
 
+fn hydra_1t_1000m(b: &mut Criterion) {
+    b.bench_function("hydra-1t-1000m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 1, 1000));
+    b.bench_function("hydra-1t-1000m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 1, 1000));
+    b.bench_function("hydra-1t-1000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 1, 1000));
+}
+
 fn hydra_32t_1m(b: &mut Criterion) {
     b.bench_function("hydra-32t-1m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 32, 1));
     b.bench_function("hydra-32t-1m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 32, 1));
@@ -292,12 +298,6 @@ fn hydra_32t_1000m(b: &mut Criterion) {
     b.bench_function("hydra-32t-1000m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 32, 1000));
     b.bench_function("hydra-32t-1000m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 32, 1000));
     b.bench_function("hydra-32t-1000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 32, 1000));
-}
-
-fn hydra_1t_1000m(b: &mut Criterion) {
-    b.bench_function("hydra-1t-1000m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 1, 1000));
-    b.bench_function("hydra-1t-1000m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 1, 1000));
-    b.bench_function("hydra-1t-1000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 1, 1000));
 }
 
 fn hydra_4t_10000m(b: &mut Criterion) {
@@ -322,9 +322,9 @@ fn kitsune_32t_1000m(b: &mut Criterion) {
     b.bench_function("kitsune-32t-1000m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 32, 1000));
 }
 
-fn kitsune_1t_1000m(b: &mut Criterion) {
-    b.bench_function("kitsune-1t-1000m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 1, 1000));
-    b.bench_function("kitsune-1t-1000m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 1, 1000));
+fn kitsune_4t_1000m(b: &mut Criterion) {
+    b.bench_function("kitsune-4t-1000m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 4, 1000));
+    b.bench_function("kitsune-4t-1000m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 4, 1000));
 }
 
 fn robin_u_32t_1m(b: &mut Criterion) {
@@ -356,14 +356,14 @@ criterion_group!(
     create,
     oneshot,
     inout,
+    hydra_1t_1000m,
     hydra_32t_1m,
     hydra_32t_1000m,
-    hydra_1t_1000m,
     hydra_4t_10000m,
     hydra_256t_1m,
     kitsune_32t_1m,
     kitsune_32t_1000m,
-    kitsune_1t_1000m,
+    kitsune_4t_1000m,
     robin_u_32t_1m,
     robin_u_4t_1000m,
     robin_b_32t_16m,
