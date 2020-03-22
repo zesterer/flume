@@ -49,7 +49,7 @@ impl<'a, T> Future for RecvFuture<'a, T> {
             Some(Err((_, TryRecvError::Disconnected))) => Poll::Ready(Err(RecvError::Disconnected)),
             Some(Err((mut inner, TryRecvError::Empty))) => {
                 // Inform the sender that we need waking
-                inner.recv_waker = Some(cx.waker().clone());
+                inner.recv_wakers.push_back(cx.waker().clone());
                 Poll::Pending
             },
             // Can't access the inner lock, try again
