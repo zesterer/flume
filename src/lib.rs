@@ -286,6 +286,7 @@ impl<T> Shared<T> {
             // Notify the receiving async task
             if let Some(recv_waker) = &inner.recv_waker {
                 recv_waker.wake_by_ref();
+                inner.recv_waker = None;
             }
         }
 
@@ -331,8 +332,10 @@ impl<T> Shared<T> {
         self.send_signal.notify_all(self.inner.lock());
         #[cfg(feature = "async")]
         {
-            if let Some(recv_waker) = &self.lock_inner().recv_waker {
+            let mut inner = self.lock_inner();
+            if let Some(recv_waker) = &inner.recv_waker {
                 recv_waker.wake_by_ref();
+                inner.recv_waker = None;
             }
         }
     }

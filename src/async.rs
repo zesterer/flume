@@ -33,14 +33,15 @@ impl<'a, T> Future for RecvFuture<'a, T> {
                 .recv
                 .shared
                 .poll_inner()
-                .map(|mut inner| self
+                .map(|inner| self
                     .recv
                     .shared
-                    .try_recv(move || {
-                        // Detach the waker
-                        inner.recv_waker = None;
-                        inner
-                    }, &mut buf, self.recv.mpmc_mode.get()))
+                    .try_recv(
+                        move || inner,
+                        &mut buf,
+                        self.recv.mpmc_mode.get()
+                    )
+                )
         };
 
         let poll = match res {
