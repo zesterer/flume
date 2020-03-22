@@ -155,18 +155,23 @@ fn send_bounded() {
 
 #[test]
 fn rendezvous() {
-    return; // TODO: Correct rendezvous behaviour
-
     let (tx, rx) = bounded(0);
 
-    let t = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(250));
+    for i in 0..20 {
+        let tx = tx.clone();
+        let t = std::thread::spawn(move || {
+            let then = Instant::now();
+            tx.send(()).unwrap();
+            let now = Instant::now();
+
+            assert!(now.duration_since(then) > Duration::from_millis(50), "iter = {}", i);
+        });
+
+        std::thread::sleep(Duration::from_millis(250));
         rx.recv().unwrap();
-    });
 
-    tx.send(()).unwrap();
-
-    t.join().unwrap();
+        t.join().unwrap();
+    }
 }
 
 #[test]
