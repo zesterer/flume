@@ -234,7 +234,7 @@ fn test_robin_b<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize) {
     });
 }
 
-fn test_mpsc_bounded_large<S: Sender>(b: &mut Bencher, thread_num: u64) {
+fn test_mpsc_bounded_no_wait<S: Sender>(b: &mut Bencher, thread_num: u64) {
     b.iter_custom(|iters| {
         let iters = iters * 1000;
         let (mut tx, mut rx) = S::bounded(iters as usize);
@@ -258,13 +258,13 @@ fn test_mpsc_bounded_large<S: Sender>(b: &mut Bencher, thread_num: u64) {
                 black_box(rx.recv());
             }
         })
-        .unwrap();
+            .unwrap();
 
         start.elapsed()
     })
 }
 
-fn test_mpsc_bounded_small<S: Sender>(b: &mut Bencher, bound: usize, thread_num: usize) {
+fn test_mpsc_bounded<S: Sender>(b: &mut Bencher, bound: usize, thread_num: usize) {
     b.iter_custom(|iters| {
         let (mut tx, mut rx) = S::bounded(bound);
         let start = Instant::now();
@@ -292,7 +292,7 @@ fn test_mpsc_bounded_small<S: Sender>(b: &mut Bencher, bound: usize, thread_num:
                 black_box(rx.recv());
             }
         })
-        .unwrap();
+            .unwrap();
 
         start.elapsed()
     })
@@ -370,22 +370,20 @@ fn robin_b_4t_1000m(b: &mut Criterion) {
     b.bench_function("robin-b-4t-1000m-std", |b| test_robin_b::<mpsc::Sender<u32>>(b, 4, 1000));
 }
 
-fn mpsc_bounded_large_4t(b: &mut Criterion) {
-    b.bench_function("mpsc-bounded-large-4t-flume", |b| test_mpsc_bounded_large::<flume::Sender<u32>>(b, 4));
-    b.bench_function("mpsc-bounded-large-4t-crossbeam", |b| test_mpsc_bounded_large::<crossbeam_channel::Sender<u32>>(b, 4));
-    b.bench_function("mpsc-bounded-large-4t-std", |b| test_mpsc_bounded_large::<mpsc::Sender<u32>>(b, 4));
+fn mpsc_bounded_no_wait_4t(b: &mut Criterion) {
+    b.bench_function("mpsc-bounded-no-wait-4t-flume", |b| test_mpsc_bounded_no_wait::<flume::Sender<u32>>(b, 4));
+    b.bench_function("mpsc-bounded-no-wait-4t-crossbeam", |b| test_mpsc_bounded_no_wait::<crossbeam_channel::Sender<u32>>(b, 4));
+    b.bench_function("mpsc-bounded-no-wait-4t-std", |b| test_mpsc_bounded_no_wait::<mpsc::Sender<u32>>(b, 4));
 }
 
-fn mpsc_bounded_4t_50m(b: &mut Criterion) {
-    let bound = 50;
-
-    for bound in &[1, 10, 50] {
+fn mpsc_bounded_4t(b: &mut Criterion) {
+    for bound in &[1, 10, 50, 10_000] {
         let text = format!("mpsc-bounded-small-4t-{}m-", bound);
         let bound = *bound;
 
-        b.bench_function(&format!("{}{}", text, "flume"), |b| test_mpsc_bounded_small::<flume::Sender<u32>>(b, bound, 4));
-        b.bench_function(&format!("{}{}", text, "crossbeam"), |b| test_mpsc_bounded_small::<crossbeam_channel::Sender<u32>>(b, bound, 4));
-        b.bench_function(&format!("{}{}", text, "std"), |b| test_mpsc_bounded_small::<mpsc::Sender<u32>>(b, bound, 4));
+        b.bench_function(&format!("{}{}", text, "flume"), |b| test_mpsc_bounded::<flume::Sender<u32>>(b, bound, 4));
+        b.bench_function(&format!("{}{}", text, "crossbeam"), |b| test_mpsc_bounded::<crossbeam_channel::Sender<u32>>(b, bound, 4));
+        b.bench_function(&format!("{}{}", text, "std"), |b| test_mpsc_bounded::<mpsc::Sender<u32>>(b, bound, 4));
     }
 }
 
@@ -394,8 +392,8 @@ criterion_group!(
     create,
     oneshot,
     inout,
-    mpsc_bounded_large_4t,
-    mpsc_bounded_4t_50m,
+    mpsc_bounded_no_wait_4t,
+    mpsc_bounded_4t,
     hydra_32t_1m,
     hydra_32t_1000m,
     hydra_256t_1m,
