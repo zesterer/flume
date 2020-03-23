@@ -94,6 +94,18 @@ fn drain() {
     }
 
     assert_eq!(rx.drain().sum::<u32>(), (0..100).sum());
+
+    for i in 0..100 {
+        tx.send(i).unwrap();
+    }
+
+    for i in 0..100 {
+        tx.send(i).unwrap();
+    }
+
+    rx.recv().unwrap();
+
+    (1u32..100).chain(0..100).zip(rx).for_each(|(l, r)| assert_eq!(l, r));
 }
 
 #[test]
@@ -160,6 +172,8 @@ fn rendezvous() {
     for i in 0..20 {
         let tx = tx.clone();
         let t = std::thread::spawn(move || {
+            assert!(tx.try_send(()).is_err());
+
             let then = Instant::now();
             tx.send(()).unwrap();
             let now = Instant::now();
