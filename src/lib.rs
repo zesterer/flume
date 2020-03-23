@@ -85,7 +85,7 @@ impl<T> Signal<T> {
         let guard = self.lock.lock().unwrap();
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
-        let guard = self.trigger.wait(guard).unwrap();
+        let _guard = self.trigger.wait(guard).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
     }
 
@@ -94,7 +94,7 @@ impl<T> Signal<T> {
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
         first(&mut *guard);
-        let guard = self.trigger.wait_while(guard, cond).unwrap();
+        let _guard = self.trigger.wait_while(guard, cond).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
     }
 
@@ -111,7 +111,7 @@ impl<T> Signal<T> {
         let guard = self.lock.lock().unwrap();
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
-        let (guard, timeout) = self.trigger.wait_timeout(guard, dur).unwrap();
+        let (_guard, timeout) = self.trigger.wait_timeout(guard, dur).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
         timeout
     }
@@ -148,8 +148,6 @@ struct Queue<T>(VecDeque<T>, Option<usize>);
 impl<T> Queue<T> {
     fn new(cap: Option<usize>) -> Self { Self(VecDeque::new(), cap) }
 
-    fn len(&self) -> usize { self.0.len() }
-
     fn push(&mut self, x: T) -> Result<(), T> {
         if self.1 == Some(self.0.len()) {
             Err(x)
@@ -164,9 +162,10 @@ impl<T> Queue<T> {
     }
 
     fn swap(&mut self, buf: &mut VecDeque<T>) {
-        // TODO: Swapping on bounded queues doesn't work correctly since it gives senders a false
+        // Swapping on bounded queues doesn't work correctly since it gives senders a false
         // impression of how many items are in the queue, allowing them to push too many items into
-        // the queue
+        // the queue. After some experimentation, it seems like the overhead of tracking the length
+        // is greater than the performance to be gained by swapping only in unbounded channels.
         if !self.1.is_some() {
             std::mem::swap(&mut self.0, buf);
         }
@@ -638,7 +637,9 @@ impl<T> Receiver<T> {
     /// `try_iter`, the iterator will not attempt to fetch any more values from the channel once
     /// the function has been called.
     pub fn drain(&self) -> Drain<T> {
-        Drain { queue: self.shared.take_remaining(), _phantom: PhantomData }
+        let mut queue = std::mem::replace(&mut *self.buffer.borrow_mut(), VecDeque::new());
+        queue.append(&mut self.shared.take_remaining().0);
+        Drain { queue, _phantom: PhantomData }
     }
 }
 
@@ -685,8 +686,9 @@ impl<'a, T> Iterator for TryIter<'a, T> {
 }
 
 /// An fixed-sized iterator over the items drained from a channel.
+#[derive(Debug)]
 pub struct Drain<'a, T> {
-    queue: Queue<T>,
+    queue: VecDeque<T>,
     /// A phantom field used to constrain the lifetime of this iterator. We do this because the
     /// implementation may change and we don't want to unintentionally constrain it. Removing this
     /// lifetime later is a possibility.
@@ -697,7 +699,7 @@ impl<'a, T> Iterator for Drain<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.queue.pop()
+        self.queue.pop_front()
     }
 }
 
