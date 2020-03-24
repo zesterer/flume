@@ -40,7 +40,7 @@ use std::task::Waker;
 #[cfg(feature = "select")]
 use crate::select::Token;
 #[cfg(feature = "async")]
-use crate::r#async::RecvFuture;
+use crate::r#async::{RecvFuture, SendFuture};
 use std::cell::Cell;
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
@@ -182,15 +182,18 @@ struct Inner<T> {
     /// In ID generator for sender selectors so we can keep track of them
     #[cfg(feature = "select")]
     send_selector_counter: usize,
-    /// Used to waken sender selectors
+    /// Used to wake sender selectors
     #[cfg(feature = "select")]
     send_selectors: Vec<(usize, Arc<Signal<Token>>, Token)>,
-    /// Used to waken a receiver selector
+    /// Used to wake a receiver selector
     #[cfg(feature = "select")]
     recv_selector: Option<(Arc<Signal<Token>>, Token)>,
-    /// Used to waken an async receiver task
+    /// Used to wake an async receiver task
     #[cfg(feature = "async")]
     recv_waker: Option<Waker>,
+    /// Used to wake async senders
+    #[cfg(feature = "async")]
+    send_wakers: VecDeque<Waker>,
     /// The number of senders associated with this channel. If this drops to 0, the channel is
     /// 'dead' and the listener will begin reporting disconnect errors (once the queue has been
     /// drained).
@@ -228,6 +231,8 @@ impl<T> Shared<T> {
 
                 #[cfg(feature = "async")]
                 recv_waker: None,
+                #[cfg(feature = "async")]
+                send_wakers: VecDeque::new(),
 
                 sender_count: 1,
                 listen_mode: 1,
@@ -274,11 +279,16 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn try_send(&self, msg: T) -> Result<(), (MutexGuard<Inner<T>>, TrySendError<T>)> {
+    fn try_send(
+        &self,
+        msg: T,
+        disconnected: &Cell<bool>,
+    ) -> Result<(), (MutexGuard<Inner<T>>, TrySendError<T>)> {
         let mut inner = self.wait_inner();
 
         if inner.listen_mode == 0 {
             // If the listener has disconnected, the channel is dead
+            disconnected.set(true);
             return Err((inner, TrySendError::Disconnected(msg)));
         }
         // If pushing fails, it's because the queue is full
@@ -287,6 +297,12 @@ impl<T> Shared<T> {
             Ok(()) => {},
         };
 
+        self.send_notify(inner);
+        Ok(())
+    }
+
+    /// Notify relevant parties that a message has been sent
+    fn send_notify(&self, inner: MutexGuard<Inner<T>>) {
         // TODO: Move this below the listen_mode check by making selectors listen-aware
         #[cfg(feature = "select")]
         {
@@ -307,14 +323,17 @@ impl<T> Shared<T> {
 
         // Notify the receiver of a new message
         self.send_signal.notify_one(inner);
-        Ok(())
     }
 
     #[inline]
-    fn send(&self, mut msg: T) -> Result<(), SendError<T>> {
+    fn send(
+        &self,
+        mut msg: T,
+        disconnected: &Cell<bool>,
+    ) -> Result<(), SendError<T>> {
         loop {
             // Attempt to send a message
-            let inner = match self.try_send(msg) {
+            let inner = match self.try_send(msg, disconnected) {
                 Ok(()) => return Ok(()),
                 Err((_, TrySendError::Disconnected(msg))) => return Err(SendError(msg)),
                 Err((inner, TrySendError::Full(m))) => if let Some(sig) = self.rendezvous_signal.as_ref() {
@@ -379,10 +398,10 @@ impl<T> Shared<T> {
         if let Some(rendezvous_signal) = self.rendezvous_signal.as_ref() {
             let mut msg = None;
             rendezvous_signal.notify_one_with(|m| msg = m.take(), ());
-            if let Some(msg) = msg {
-                return Ok(msg);
+            return if let Some(msg) = msg {
+                Ok(msg)
             } else {
-                return Err((inner, TryRecvError::Empty));
+                Err((inner, TryRecvError::Empty))
             }
         }
 
@@ -399,6 +418,14 @@ impl<T> Shared<T> {
         // Swap the buffers to grab the messages
         inner.queue.swap(buf);
 
+        self.recv_notify(inner);
+
+        Ok(msg)
+    }
+
+    /// Notify relevant parties that a message has been received. Only relevant for bounded queues
+    /// because they are the only queues with senders that wait to be notified.
+    fn recv_notify(&self, mut inner: MutexGuard<Inner<T>>) {
         #[cfg(feature = "select")]
         {
             // Notify send selectors
@@ -410,13 +437,19 @@ impl<T> Shared<T> {
                 });
         }
 
+        #[cfg(feature = "async")]
+        {
+            // Notify one async sender
+            if let Some(waker) = inner.send_wakers.pop_front() {
+                waker.wake();
+            }
+        }
+
         // If there are senders waiting for a message, wake them up.
         if let Some(recv_signal) = self.recv_signal.as_ref() {
             // Notify the receiver of a new message
             recv_signal.notify_one(inner);
         }
-
-        Ok(msg)
     }
 
     #[inline]
@@ -519,20 +552,32 @@ impl<T> Shared<T> {
 /// A transmitting end of a channel.
 pub struct Sender<T> {
     shared: Arc<Shared<T>>,
+    disconnected: Cell<bool>,
 }
 
 impl<T> Sender<T> {
     /// Send a value into the channel, returning an error if the channel receiver has
     /// been dropped. If the channel is bounded and is full, this method will block.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        self.shared.send(msg)
+        self.shared.send(msg, &self.disconnected)
     }
 
     /// Attempt to send a value into the channel. If the channel is bounded and full, or the
     /// receiver has been dropped, an error is returned. If the channel associated with this
     /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        self.shared.try_send(msg).map(|_| ()).map_err(|(_, err)| err)
+        self.shared.try_send(msg, &self.disconnected).map(|_| ()).map_err(|(_, err)| err)
+    }
+}
+
+impl<T: Unpin> Sender<T> {
+    // Takes `&mut self` to avoid >1 task waiting on this channel
+    // TODO: Is this necessary?
+    /// Create a future that may be used to send asynchronously a value to a channel, without
+    /// blocking to wait for space or to acquire the lock.
+    #[cfg(feature = "async")]
+    pub fn send_async(&self, msg: T) -> SendFuture<T> {
+        SendFuture::new(self, msg)
     }
 }
 
@@ -542,7 +587,10 @@ impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.shared.wait_inner().sender_count += 1;
         //self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
-        Self { shared: self.shared.clone() }
+        Self {
+            shared: self.shared.clone(),
+            disconnected: Cell::new(false)
+        }
     }
 }
 
@@ -739,7 +787,10 @@ impl<T> Iterator for IntoIter<T> {
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(None));
     (
-        Sender { shared: shared.clone() },
+        Sender {
+            shared: shared.clone(),
+            disconnected: Cell::new(false),
+        },
         Receiver {
             shared,
             buffer: RefCell::new(VecDeque::new()),
@@ -777,7 +828,10 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(Some(cap)));
     (
-        Sender { shared: shared.clone() },
+        Sender {
+            shared: shared.clone(),
+            disconnected: Cell::new(false),
+        },
         Receiver {
             shared,
             buffer: RefCell::new(VecDeque::new()),
