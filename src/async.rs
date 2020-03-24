@@ -97,6 +97,10 @@ impl<T> PollSendError<T> {
 }
 
 impl<T> Sender<T> {
+    pub fn sink(&self) -> SenderSink<T> {
+        SenderSink::new(self)
+    }
+
     #[inline]
     fn poll(&self, msg: T, cx: &mut Context<'_>) -> Result<(), PollSendError<T>> {
         let mut inner = match self.shared.poll_inner() {
@@ -199,6 +203,13 @@ pub struct SenderSink<'a, T> {
 }
 
 impl<'a, T> SenderSink<'a, T> {
+    fn new(send: &'a Sender<T>) -> Self {
+        SenderSink {
+            buf: VecDeque::new(),
+            send,
+        }
+    }
+
     pub fn into_pending(self) -> Vec<T> {
         self.buf.into()
     }
