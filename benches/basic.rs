@@ -51,7 +51,7 @@ impl<T: Send + Default + 'static> Receiver for flume::Receiver<T> {
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item=T> + '_> {
-        Box::new(flume::Receiver::iter(self))
+        Box::new(std::iter::from_fn(move || flume::Receiver::recv(self).ok()))
     }
 }
 
@@ -270,7 +270,7 @@ fn test_mpsc_bounded<S: Sender>(b: &mut Bencher, bound: usize, thread_num: usize
         let start = Instant::now();
 
         crossbeam_utils::thread::scope(|scope| {
-            let msgs = iters as usize * bound;
+            let msgs = iters as usize * bound.max(1);
 
             for _ in 0..thread_num {
                 let tx = tx.clone();
@@ -377,7 +377,7 @@ fn mpsc_bounded_no_wait_4t(b: &mut Criterion) {
 }
 
 fn mpsc_bounded_4t(b: &mut Criterion) {
-    for bound in &[1, 10, 50, 10_000] {
+    for bound in &[0, 1, 10, 50, 10_000] {
         let text = format!("mpsc-bounded-small-4t-{}m-", bound);
         let bound = *bound;
 
@@ -389,10 +389,10 @@ fn mpsc_bounded_4t(b: &mut Criterion) {
 
 criterion_group!(
     compare,
-    create,
-    oneshot,
-    inout,
-    mpsc_bounded_no_wait_4t,
+    // create,
+    // oneshot,
+    // inout,
+    // mpsc_bounded_no_wait_4t,
     mpsc_bounded_4t,
     hydra_32t_1m,
     hydra_32t_1000m,
