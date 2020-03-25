@@ -696,23 +696,18 @@ impl<T> Sender<T> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
-
                 if self.shared.disconnected.load(Ordering::Relaxed) {
                     return Err(TrySendError::Disconnected(msg));
-                }
-
-                if let Some(recv) = pending.receivers.pop_front() {
+                } else if let Some(recv) = pending.receivers.pop_front() {
                     debug_assert!(pending.queue.len() == 0);
                     recv.notify_one_with(|m| *m = Some(msg), ());
-                    return Ok(());
-                }
-
-                if pending.queue.len() < *cap {
+                    Ok(())
+                } else if pending.queue.len() < *cap {
                     pending.queue.push_back(msg);
-                    return Ok(());
+                    Ok(())
+                } else {
+                    Err(TrySendError::Full(msg))
                 }
-
-                Err(TrySendError::Full(msg))
             },
             Channel::Unbounded { queue } => {
                 if self.shared.disconnected.load(Ordering::Relaxed) {
@@ -734,33 +729,29 @@ impl<T> Sender<T> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
-
                 if self.shared.disconnected.load(Ordering::Relaxed) {
                     return Err(SendError(msg));
-                }
-
-                if let Some(recv) = pending.receivers.pop_front() {
+                } else if let Some(recv) = pending.receivers.pop_front() {
+                    debug_assert!(pending.queue.len() == 0);
                     recv.notify_one_with(|m| *m = Some(msg), ());
-                    return Ok(());
-                }
-
-                if pending.queue.len() < *cap {
-                    pending.queue.push_back(msg);
-                    return Ok(());
-                }
-
-                let unblock_signal = self.unblock_signal.as_ref().unwrap();
-                *unblock_signal.lock() = Some(msg);
-                pending.senders.push_back(unblock_signal.clone());
-
-                unblock_signal.wait_while(pending, |msg| {
-                    msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed)
-                });
-
-                if let Some(msg) = unblock_signal.lock().take() {
-                    Err(SendError(msg))
-                } else {
                     Ok(())
+                } else if pending.queue.len() < *cap {
+                    pending.queue.push_back(msg);
+                    Ok(())
+                } else {
+                    let unblock_signal = self.unblock_signal.as_ref().unwrap();
+                    *unblock_signal.lock() = Some(msg);
+                    pending.senders.push_back(unblock_signal.clone());
+
+                    unblock_signal.wait_while(pending, |msg| {
+                        msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed)
+                    });
+
+                    if let Some(msg) = unblock_signal.lock().take() {
+                        Err(SendError(msg))
+                    } else {
+                        Ok(())
+                    }
                 }
             },
             Channel::Unbounded { queue } => {
@@ -861,9 +852,7 @@ impl<T> Receiver<T> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
-
                 pull_pending(*cap, &mut pending);
-
                 if let Some(msg) = pending.queue.pop_front() {
                     Ok(msg)
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
@@ -890,9 +879,7 @@ impl<T> Receiver<T> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
-
                 pull_pending(*cap, &mut pending);
-
                 if let Some(msg) = pending.queue.pop_front() {
                     Ok(msg)
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
