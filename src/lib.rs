@@ -222,6 +222,11 @@ fn wait_lock<'a, T>(lock: &'a InnerMutex<T>) -> MutexGuard<'a, T> {
     }
 }
 
+#[inline]
+fn poll_lock<'a, T>(lock: &'a InnerMutex<T>) -> Option<MutexGuard<'a, T>> {
+    lock.try_lock()
+}
+
 /// Wrapper around a queue. This wrapper exists to permit a maximum length.
 struct Queue<T>(VecDeque<T>, Option<usize>);
 
@@ -706,7 +711,20 @@ impl<T> Sender<T> {
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending, queue } => {
-                let mut queue = wait_lock(&queue);
+                let mut queue = {
+                    let mut i = 0;
+                    loop {
+                        if i > *cap {
+                            break wait_lock(&queue);
+                        } else if let Some(queue) = poll_lock(&queue) {
+                            if queue.len() < *cap {
+                                break queue;
+                            }
+                        }
+                        thread::yield_now();
+                        i += 1;
+                    }
+                };
                 if self.shared.disconnected.load(Ordering::Relaxed) {
                     Err(SendError(msg))
                 } else if queue.len() < *cap {
@@ -718,10 +736,12 @@ impl<T> Sender<T> {
 
                     *unblock_signal.lock() = Some(msg);
                     wait_lock(&pending).push_back(unblock_signal.clone());
+
                     self.shared.send_signal.notify_one(());
 
-                    unblock_signal.wait_while(queue, |msg| msg.is_some() &&
-                        !self.shared.disconnected.load(Ordering::Relaxed));
+                    unblock_signal.wait_while(queue, |msg| {
+                        msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed)
+                    });
 
                     if let Some(msg) = unblock_signal.lock().take() {
                         Err(SendError(msg))
