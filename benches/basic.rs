@@ -389,9 +389,9 @@ fn mpsc_bounded_4t(b: &mut Criterion) {
 
 criterion_group!(
     compare,
-    create,
-    oneshot,
-    inout,
+    // create,
+    // oneshot,
+    // inout,
     mpsc_bounded_no_wait_4t,
     mpsc_bounded_4t,
     hydra_32t_1m,

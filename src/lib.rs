@@ -290,11 +290,16 @@ struct Inner<T> {
     listen_mode: usize,
 }
 
+struct BoundedQueues<T> {
+    senders: VecDeque<Arc<Signal<Option<T>>>>,
+    queue: VecDeque<T>,
+    receivers: VecDeque<Arc<Signal<Option<T>>>>,
+}
+
 enum Channel<T> {
     Bounded {
         cap: usize,
-        pending: spin::Mutex<VecDeque<Arc<Signal<Option<T>>>>>,
-        queue: spin::Mutex<VecDeque<T>>,
+        pending: spin::Mutex<BoundedQueues<T>>,
     },
     Unbounded {
         queue: spin::Mutex<VecDeque<T>>,
@@ -321,8 +326,11 @@ impl<T> Shared<T> {
             chan: if let Some(cap) = cap {
                 Channel::Bounded {
                     cap,
-                    pending: spin::Mutex::new(VecDeque::new()),
-                    queue: spin::Mutex::new(VecDeque::new()),
+                    pending: spin::Mutex::new(BoundedQueues {
+                        senders: VecDeque::new(),
+                        queue: VecDeque::new(),
+                        receivers: VecDeque::new(),
+                    }),
                 }
             } else {
                 Channel::Unbounded {
@@ -486,7 +494,10 @@ impl<T> Shared<T> {
     fn receiver_disconnected(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
         if let Channel::Bounded { pending, .. } = &self.chan {
-            for signal in pending.lock().iter() {
+            for signal in pending.lock().senders.iter() {
+                signal.notify_all(());
+            }
+            for signal in pending.lock().receivers.iter() {
                 signal.notify_all(());
             }
         }
@@ -673,6 +684,9 @@ impl<T> Shared<T> {
 pub struct Sender<T> {
     shared: Arc<Shared<T>>,
     unblock_signal: Option<Arc<Signal<Option<T>>>>,
+    /// Used to prevent Sync being implemented for this type - we never actually use it!
+    /// TODO: impl<T> !Sync for Receiver<T> {} when negative traits are stable
+    _phantom_cell: UnsafeCell<()>,
 }
 
 impl<T> Sender<T> {
@@ -680,17 +694,25 @@ impl<T> Sender<T> {
     /// been dropped. If the channel is bounded and is full, this method will block.
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
         match &self.shared.chan {
-            Channel::Bounded { cap, pending, queue } => {
-                let mut queue = wait_lock(&queue);
+            Channel::Bounded { cap, pending } => {
+                let mut pending = wait_lock(&pending);
+
                 if self.shared.disconnected.load(Ordering::Relaxed) {
-                    Err(TrySendError::Disconnected(msg))
-                } else if queue.len() < *cap {
-                    queue.push_back(msg);
-                    self.shared.send_signal.notify_one(());
-                    return Ok(());
-                } else {
-                    Err(TrySendError::Full(msg))
+                    return Err(TrySendError::Disconnected(msg));
                 }
+
+                if let Some(recv) = pending.receivers.pop_front() {
+                    debug_assert!(pending.queue.len() == 0);
+                    recv.notify_one_with(|m| *m = Some(msg), ());
+                    return Ok(());
+                }
+
+                if pending.queue.len() < *cap {
+                    pending.queue.push_back(msg);
+                    return Ok(());
+                }
+
+                Err(TrySendError::Full(msg))
             },
             Channel::Unbounded { queue } => {
                 if self.shared.disconnected.load(Ordering::Relaxed) {
@@ -710,44 +732,35 @@ impl<T> Sender<T> {
     /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         match &self.shared.chan {
-            Channel::Bounded { cap, pending, queue } => {
-                let mut queue = {
-                    let mut i = 0;
-                    loop {
-                        if i > *cap {
-                            break wait_lock(&queue);
-                        } else if let Some(queue) = poll_lock(&queue) {
-                            if queue.len() < *cap {
-                                break queue;
-                            }
-                        }
-                        thread::yield_now();
-                        i += 1;
-                    }
-                };
+            Channel::Bounded { cap, pending } => {
+                let mut pending = wait_lock(&pending);
+
                 if self.shared.disconnected.load(Ordering::Relaxed) {
-                    Err(SendError(msg))
-                } else if queue.len() < *cap {
-                    queue.push_back(msg);
-                    self.shared.send_signal.notify_one(());
+                    return Err(SendError(msg));
+                }
+
+                if let Some(recv) = pending.receivers.pop_front() {
+                    recv.notify_one_with(|m| *m = Some(msg), ());
                     return Ok(());
+                }
+
+                if pending.queue.len() < *cap {
+                    pending.queue.push_back(msg);
+                    return Ok(());
+                }
+
+                let unblock_signal = self.unblock_signal.as_ref().unwrap();
+                *unblock_signal.lock() = Some(msg);
+                pending.senders.push_back(unblock_signal.clone());
+
+                unblock_signal.wait_while(pending, |msg| {
+                    msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed)
+                });
+
+                if let Some(msg) = unblock_signal.lock().take() {
+                    Err(SendError(msg))
                 } else {
-                    let unblock_signal = self.unblock_signal.as_ref().unwrap();
-
-                    *unblock_signal.lock() = Some(msg);
-                    wait_lock(&pending).push_back(unblock_signal.clone());
-
-                    self.shared.send_signal.notify_one(());
-
-                    unblock_signal.wait_while(queue, |msg| {
-                        msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed)
-                    });
-
-                    if let Some(msg) = unblock_signal.lock().take() {
-                        Err(SendError(msg))
-                    } else {
-                        Ok(())
-                    }
+                    Ok(())
                 }
             },
             Channel::Unbounded { queue } => {
@@ -786,6 +799,7 @@ impl<T> Clone for Sender<T> {
         Self {
             shared: self.shared.clone(),
             unblock_signal: Some(Arc::new(Signal::default())),
+            _phantom_cell: UnsafeCell::new(()),
         }
     }
 }
@@ -813,6 +827,7 @@ impl<T> fmt::Debug for Sender<T> {
 /// The receiving end of a channel.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
+    unblock_signal: Option<Arc<Signal<Option<T>>>>,
     /// Buffer for messages
     buffer: RefCell<VecDeque<T>>,
     /// Used to prevent Sync being implemented for this type - we never actually use it!
@@ -824,15 +839,14 @@ pub struct Receiver<T> {
 
 fn pull_pending<T>(
     cap: usize,
-    pending: &mut MutexGuard<VecDeque<Arc<Signal<Option<T>>>>>,
-    queue: &mut MutexGuard<VecDeque<T>>,
+    pending: &mut BoundedQueues<T>,
 ) {
-    while queue.len() <= cap {
-        if let Some(signal) = pending.pop_front() {
+    while pending.queue.len() <= cap {
+        if let Some(signal) = pending.senders.pop_front() {
             let mut msg = None;
             signal.notify_one_with(|m| msg = m.take(), ());
             if let Some(msg) = msg {
-                queue.push_back(msg);
+                pending.queue.push_back(msg);
             }
         } else {
             break;
@@ -845,13 +859,15 @@ impl<T> Receiver<T> {
     /// returning an error if the channel is empty or all channel senders have been dropped.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         match &self.shared.chan {
-            Channel::Bounded { cap, pending, queue } => {
-                let (mut queue, mut pending) = (wait_lock(&queue), wait_lock(&pending));
-                pull_pending(*cap, &mut pending, &mut queue);
-                if let Some(msg) = queue.pop_front() {
+            Channel::Bounded { cap, pending } => {
+                let mut pending = wait_lock(&pending);
+
+                pull_pending(*cap, &mut pending);
+
+                if let Some(msg) = pending.queue.pop_front() {
                     Ok(msg)
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
-                    Err(TryRecvError::Disconnected)
+                    return Err(TryRecvError::Disconnected);
                 } else {
                     Err(TryRecvError::Empty)
                 }
@@ -872,15 +888,24 @@ impl<T> Receiver<T> {
     /// error if all channel senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
         match &self.shared.chan {
-            Channel::Bounded { cap, pending, queue } => loop {
-                let (mut queue, mut pending) = (wait_lock(&queue), wait_lock(&pending));
-                pull_pending(*cap, &mut pending, &mut queue);
-                if let Some(msg) = queue.pop_front() {
-                    break Ok(msg);
+            Channel::Bounded { cap, pending } => {
+                let mut pending = wait_lock(&pending);
+
+                pull_pending(*cap, &mut pending);
+
+                if let Some(msg) = pending.queue.pop_front() {
+                    Ok(msg)
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
-                    break Err(RecvError::Disconnected);
+                    return Err(RecvError::Disconnected);
                 } else {
-                    self.shared.send_signal.wait((queue, pending));
+                    let unblock_signal = self.unblock_signal.as_ref().unwrap();
+                    pending.receivers.push_back(unblock_signal.clone());
+
+                    unblock_signal.wait_while(pending, |msg| {
+                        msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed)
+                    });
+
+                    Ok(unblock_signal.lock().take().unwrap())
                 }
             },
             Channel::Unbounded { queue } => loop {
@@ -906,7 +931,10 @@ impl<T> Receiver<T> {
     /// error if all channel senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
         match &self.shared.chan {
-            Channel::Bounded { cap, pending, queue } => loop {
+            Channel::Bounded { cap, pending } => loop {
+
+                todo!()
+                /*
                 let (mut queue, mut pending) = (wait_lock(&queue), wait_lock(&pending));
                 pull_pending(*cap, &mut pending, &mut queue);
                 if let Some(msg) = queue.pop_front() {
@@ -924,6 +952,7 @@ impl<T> Receiver<T> {
                         break Err(RecvTimeoutError::Timeout);
                     }
                 }
+                */
             },
             Channel::Unbounded { queue } => loop {
                 let mut queue = wait_lock(&queue);
@@ -972,12 +1001,15 @@ impl<T> Receiver<T> {
     /// the function has been called.
     pub fn drain(&self) -> Drain<T> {
         let queue = match &self.shared.chan {
-            Channel::Bounded { cap, pending, queue } => {
+            Channel::Bounded { cap, pending } => {
+                todo!()
+                /*
                 let (mut queue, mut pending) = (wait_lock(&queue), wait_lock(&pending));
 
                 pull_pending(*cap, &mut pending, &mut queue);
 
                 std::mem::take(&mut *queue)
+                */
             },
             Channel::Unbounded { queue } => std::mem::take(&mut *wait_lock(&queue)),
         };
@@ -1091,9 +1123,11 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
         Sender {
             shared: shared.clone(),
             unblock_signal: None,
+            _phantom_cell: UnsafeCell::new(())
         },
         Receiver {
             shared,
+            unblock_signal: Some(Arc::new(Signal::default())),
             buffer: RefCell::new(VecDeque::new()),
             finished: Cell::new(false),
             _phantom_cell: UnsafeCell::new(())
@@ -1132,9 +1166,11 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
         Sender {
             shared: shared.clone(),
             unblock_signal: Some(Arc::new(Signal::default())),
+            _phantom_cell: UnsafeCell::new(())
         },
         Receiver {
             shared,
+            unblock_signal: Some(Arc::new(Signal::default())),
             buffer: RefCell::new(VecDeque::new()),
             finished: Cell::new(false),
             _phantom_cell: UnsafeCell::new(())
