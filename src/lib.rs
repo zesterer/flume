@@ -690,9 +690,7 @@ pub struct Sender<T> {
 }
 
 impl<T> Sender<T> {
-    /// Send a value into the channel, returning an error if the channel receiver has
-    /// been dropped. If the channel is bounded and is full, this method will block.
-    pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
+    pub fn send_inner(&self, msg: T, block: bool) -> Result<(), TrySendError<T>> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
@@ -705,6 +703,20 @@ impl<T> Sender<T> {
                 } else if pending.queue.len() < *cap {
                     pending.queue.push_back(msg);
                     Ok(())
+                } else if block {
+                    let unblock_signal = self.unblock_signal.as_ref().unwrap();
+                    *unblock_signal.lock() = Some(msg);
+                    pending.senders.push_back(unblock_signal.clone());
+
+                    unblock_signal.wait_while(pending, |msg| {
+                        msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed)
+                    });
+
+                    if let Some(msg) = unblock_signal.lock().take() {
+                        Err(TrySendError::Disconnected(msg))
+                    } else {
+                        Ok(())
+                    }
                 } else {
                     Err(TrySendError::Full(msg))
                 }
@@ -722,49 +734,20 @@ impl<T> Sender<T> {
         }
     }
 
+    /// Send a value into the channel, returning an error if the channel receiver has
+    /// been dropped. If the channel is bounded and is full, this method will block.
+    pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
+        self.send_inner(msg, false)
+    }
+
     /// Attempt to send a value into the channel. If the channel is bounded and full, or the
     /// receiver has been dropped, an error is returned. If the channel associated with this
     /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        match &self.shared.chan {
-            Channel::Bounded { cap, pending } => {
-                let mut pending = wait_lock(&pending);
-                if self.shared.disconnected.load(Ordering::Relaxed) {
-                    return Err(SendError(msg));
-                } else if let Some(recv) = pending.receivers.pop_front() {
-                    debug_assert!(pending.queue.len() == 0);
-                    recv.notify_one_with(|m| *m = Some(msg), ());
-                    Ok(())
-                } else if pending.queue.len() < *cap {
-                    pending.queue.push_back(msg);
-                    Ok(())
-                } else {
-                    let unblock_signal = self.unblock_signal.as_ref().unwrap();
-                    *unblock_signal.lock() = Some(msg);
-                    pending.senders.push_back(unblock_signal.clone());
-
-                    unblock_signal.wait_while(pending, |msg| {
-                        msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed)
-                    });
-
-                    if let Some(msg) = unblock_signal.lock().take() {
-                        Err(SendError(msg))
-                    } else {
-                        Ok(())
-                    }
-                }
-            },
-            Channel::Unbounded { queue } => {
-                if self.shared.disconnected.load(Ordering::Relaxed) {
-                    Err(SendError(msg))
-                } else {
-                    let mut queue = wait_lock(&queue);
-                    queue.push_back(msg);
-                    self.shared.send_signal.notify_one(queue);
-                    Ok(())
-                }
-            },
-        }
+        self.send_inner(msg, true).map_err(|err| match err {
+            TrySendError::Disconnected(msg) => SendError(msg),
+            TrySendError::Full(_) => unreachable!(),
+        })
     }
 
     // /// Send a value into the channel, returning an error if the channel receiver has
@@ -846,9 +829,7 @@ fn pull_pending<T>(
 }
 
 impl<T> Receiver<T> {
-    /// Attempt to fetch an incoming value from the channel associated with this receiver,
-    /// returning an error if the channel is empty or all channel senders have been dropped.
-    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+    pub fn recv_inner(&self, block: bool) -> Result<T, TryRecvError> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
@@ -857,34 +838,7 @@ impl<T> Receiver<T> {
                     Ok(msg)
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
                     return Err(TryRecvError::Disconnected);
-                } else {
-                    Err(TryRecvError::Empty)
-                }
-            },
-            Channel::Unbounded { queue } => {
-                if let Some(msg) = wait_lock(&queue).pop_front() {
-                    Ok(msg)
-                } else if self.shared.disconnected.load(Ordering::Relaxed) {
-                    Err(TryRecvError::Disconnected)
-                } else {
-                    Err(TryRecvError::Empty)
-                }
-            },
-        }
-    }
-
-    /// Wait for an incoming value from the channel associated with this receiver, returning an
-    /// error if all channel senders have been dropped.
-    pub fn recv(&self) -> Result<T, RecvError> {
-        match &self.shared.chan {
-            Channel::Bounded { cap, pending } => {
-                let mut pending = wait_lock(&pending);
-                pull_pending(*cap, &mut pending);
-                if let Some(msg) = pending.queue.pop_front() {
-                    Ok(msg)
-                } else if self.shared.disconnected.load(Ordering::Relaxed) {
-                    return Err(RecvError::Disconnected);
-                } else {
+                } else if block {
                     let unblock_signal = self.unblock_signal.as_ref().unwrap();
                     pending.receivers.push_back(unblock_signal.clone());
 
@@ -892,7 +846,12 @@ impl<T> Receiver<T> {
                         msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed)
                     });
 
-                    Ok(unblock_signal.lock().take().unwrap())
+                    unblock_signal
+                        .lock()
+                        .take()
+                        .ok_or(TryRecvError::Disconnected)
+                } else {
+                    Err(TryRecvError::Empty)
                 }
             },
             Channel::Unbounded { queue } => loop {
@@ -900,12 +859,30 @@ impl<T> Receiver<T> {
                 if let Some(msg) = queue.pop_front() {
                     break Ok(msg);
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
-                    break Err(RecvError::Disconnected);
-                } else {
+                    break Err(TryRecvError::Disconnected);
+                } else if block {
                     self.shared.send_signal.wait(queue);
+                } else {
+                    break Err(TryRecvError::Empty);
                 }
             },
         }
+    }
+
+
+    /// Attempt to fetch an incoming value from the channel associated with this receiver,
+    /// returning an error if the channel is empty or all channel senders have been dropped.
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.recv_inner(false)
+    }
+
+    /// Wait for an incoming value from the channel associated with this receiver, returning an
+    /// error if all channel senders have been dropped.
+    pub fn recv(&self) -> Result<T, RecvError> {
+        self.recv_inner(true).map_err(|err| match err {
+            TryRecvError::Disconnected => RecvError::Disconnected,
+            TryRecvError::Empty => unreachable!(),
+        })
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
