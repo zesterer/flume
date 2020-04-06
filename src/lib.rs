@@ -290,6 +290,10 @@ struct Inner<T> {
     listen_mode: usize,
 }
 
+/// Invariants; While locked, one of the following will be true:
+/// - The queue will be full (i.e: contain example `cap` items)
+/// - the `senders` queue will be empty
+/// Additionally, a non-empty queue implies that `receivers` will be empty
 struct BoundedQueues<T> {
     senders: VecDeque<Arc<Signal<Option<T>>>>,
     queue: VecDeque<T>,
@@ -690,7 +694,7 @@ pub struct Sender<T> {
 }
 
 impl<T> Sender<T> {
-    pub fn send_inner(&self, msg: T, block: bool) -> Result<(), TrySendError<T>> {
+    fn send_inner(&self, msg: T, block: bool) -> Result<(), TrySendError<T>> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
@@ -812,10 +816,10 @@ pub struct Receiver<T> {
 }
 
 fn pull_pending<T>(
-    cap: usize,
+    effective_cap: usize,
     pending: &mut BoundedQueues<T>,
 ) {
-    while pending.queue.len() <= cap {
+    while pending.queue.len() < effective_cap {
         if let Some(signal) = pending.senders.pop_front() {
             let mut msg = None;
             signal.notify_one_with(|m| msg = m.take(), ());
@@ -829,11 +833,11 @@ fn pull_pending<T>(
 }
 
 impl<T> Receiver<T> {
-    pub fn recv_inner(&self, block: bool) -> Result<T, TryRecvError> {
+    fn recv_inner(&self, block: bool) -> Result<T, TryRecvError> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
-                pull_pending(*cap, &mut pending);
+                pull_pending(*cap + 1, &mut pending);
                 if let Some(msg) = pending.queue.pop_front() {
                     Ok(msg)
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
@@ -897,7 +901,7 @@ impl<T> Receiver<T> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => loop {
 
-                todo!()
+                todo!("recv_deadline for bounded")
                 /*
                 let (mut queue, mut pending) = (wait_lock(&queue), wait_lock(&pending));
                 pull_pending(*cap, &mut pending, &mut queue);
@@ -966,14 +970,10 @@ impl<T> Receiver<T> {
     pub fn drain(&self) -> Drain<T> {
         let queue = match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
-                todo!()
-                /*
-                let (mut queue, mut pending) = (wait_lock(&queue), wait_lock(&pending));
-
-                pull_pending(*cap, &mut pending, &mut queue);
-
-                std::mem::take(&mut *queue)
-                */
+                let mut pending = wait_lock(&pending);
+                let msgs = std::mem::take(&mut pending.queue);
+                pull_pending(*cap, &mut pending);
+                msgs
             },
             Channel::Unbounded { queue } => std::mem::take(&mut *wait_lock(&queue)),
         };
