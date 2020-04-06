@@ -1,12 +1,12 @@
 //! Futures and other types that allow asynchronous interaction with channels.
 
+use crate::*;
+use futures::{future::FusedFuture, stream::FusedStream, Sink, Stream};
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
-use crate::*;
-use futures::{Stream, stream::FusedStream, future::FusedFuture, Sink};
 
 impl<T> Receiver<T> {
     #[inline]
@@ -16,23 +16,19 @@ impl<T> Receiver<T> {
         let res = if let Some(msg) = buf.pop_front() {
             return Poll::Ready(Ok(msg)); // Avoid the need to lock the inner
         } else {
-            self
-                .shared
-                .poll_inner()
-                .map(|mut inner| self
-                    .shared
-                    .try_recv(
-                        move || {
-                            // Detach the waker
-                            inner.recv_waker = None;
-                            // Inform the sender that we no longer need waking
-                            inner.listen_mode = 1;
-                            inner
-                        },
-                        &mut buf,
-                        &self.finished,
-                    )
+            self.shared.poll_inner().map(|mut inner| {
+                self.shared.try_recv(
+                    move || {
+                        // Detach the waker
+                        inner.recv_waker = None;
+                        // Inform the sender that we no longer need waking
+                        inner.listen_mode = 1;
+                        inner
+                    },
+                    &mut buf,
+                    &self.finished,
                 )
+            })
         };
 
         let poll = match res {
@@ -43,12 +39,12 @@ impl<T> Receiver<T> {
                 inner.recv_waker = Some(cx.waker().clone());
                 inner.listen_mode = 2;
                 Poll::Pending
-            },
+            }
             // Can't access the inner lock, try again
             None => {
                 cx.waker().wake_by_ref();
                 Poll::Pending
-            },
+            }
         };
 
         poll
@@ -108,7 +104,7 @@ impl<T> Sender<T> {
             None => {
                 cx.waker().wake_by_ref();
                 return Err(PollSendError::CouldNotLock(msg));
-            },
+            }
         };
 
         if inner.listen_mode == 0 {
@@ -120,9 +116,9 @@ impl<T> Sender<T> {
             Err(msg) => {
                 // Let the receiver know that we need to be woken
                 inner.send_wakers.push_back(cx.waker().clone());
-                return Err(PollSendError::Full(msg))
-            },
-            Ok(()) => {},
+                return Err(PollSendError::Full(msg));
+            }
+            Ok(()) => {}
         };
 
         self.shared.send_notify(inner);
@@ -160,7 +156,10 @@ pub struct SendFuture<'a, T> {
 
 impl<'a, T> SendFuture<'a, T> {
     pub(crate) fn new(send: &Sender<T>, msg: T) -> SendFuture<T> {
-        SendFuture { send, msg: Some(msg) }
+        SendFuture {
+            send,
+            msg: Some(msg),
+        }
     }
 }
 
@@ -178,13 +177,14 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
             Some(msg) => match self.send.poll(msg, cx) {
                 Ok(()) => Poll::Ready(Ok(())),
                 Err(PollSendError::Disconnected(m)) => {
-                    self.msg.replace( m);
+                    self.msg.replace(m);
                     Poll::Ready(Err(Disconnected))
-                },
-                Err(e) => { // Need to wait a bit... poll will be rescheduled by `send.poll`
+                }
+                Err(e) => {
+                    // Need to wait a bit... poll will be rescheduled by `send.poll`
                     self.msg.replace(e.into_message());
                     Poll::Pending
-                },
+                }
             },
             None => Poll::Pending,
         }
@@ -246,11 +246,12 @@ impl<'a, T: Unpin> Sink<T> for SenderSink<'a, T> {
                 Err(PollSendError::Disconnected(m)) => {
                     self.buf.push_front(m);
                     Poll::Ready(Err(Disconnected))
-                },
-                Err(e) => { // Need to wait a bit... poll will be rescheduled by `send.poll`
+                }
+                Err(e) => {
+                    // Need to wait a bit... poll will be rescheduled by `send.poll`
                     self.buf.push_front(e.into_message());
                     Poll::Pending
-                },
+                }
             },
             None => Poll::Ready(Ok(())),
         }

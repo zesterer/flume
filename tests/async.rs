@@ -22,9 +22,7 @@ fn r#async() {
 async fn send_100_million_no_drop_or_reorder() {
     #[derive(Debug)]
     enum Message {
-        Increment {
-            old: u64,
-        },
+        Increment { old: u64 },
         ReturnCount,
     }
 

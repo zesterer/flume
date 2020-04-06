@@ -13,35 +13,38 @@
 //! assert_eq!(rx.recv().unwrap(), 42);
 //! ```
 
-#[cfg(feature = "select")]
-pub mod select;
 #[cfg(feature = "async")]
 pub mod r#async;
+#[cfg(feature = "select")]
+pub mod select;
 
 // Reexports
 #[cfg(feature = "select")]
 pub use select::Selector;
 
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Condvar, Mutex, WaitTimeoutResult, atomic::{AtomicUsize, Ordering}},
-    time::{Duration, Instant},
-    cell::{UnsafeCell, RefCell},
-    marker::PhantomData,
-    thread,
-};
-#[cfg(windows)]
-use std::sync::{Mutex as InnerMutex, MutexGuard};
 #[cfg(not(windows))]
 use spin::{Mutex as InnerMutex, MutexGuard};
+#[cfg(windows)]
+use std::sync::{Mutex as InnerMutex, MutexGuard};
+use std::{
+    cell::{RefCell, UnsafeCell},
+    collections::VecDeque,
+    marker::PhantomData,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Condvar, Mutex, WaitTimeoutResult,
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 #[cfg(feature = "async")]
-use std::task::Waker;
+use crate::r#async::{RecvFuture, SendFuture};
 #[cfg(feature = "select")]
 use crate::select::Token;
-#[cfg(feature = "async")]
-use crate::r#async::{RecvFuture, SendFuture};
 use std::cell::Cell;
+#[cfg(feature = "async")]
+use std::task::Waker;
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -89,7 +92,12 @@ impl<T> Signal<T> {
         self.waiters.fetch_sub(1, Ordering::Relaxed);
     }
 
-    fn do_then_wait_while<G>(&self, sync_guard: G, first: impl FnOnce(&mut T), cond: impl FnMut(&mut T) -> bool) {
+    fn do_then_wait_while<G>(
+        &self,
+        sync_guard: G,
+        first: impl FnOnce(&mut T),
+        cond: impl FnMut(&mut T) -> bool,
+    ) {
         let mut guard = self.lock.lock().unwrap();
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
@@ -146,7 +154,9 @@ impl<T> Signal<T> {
 struct Queue<T>(VecDeque<T>, Option<usize>);
 
 impl<T> Queue<T> {
-    fn new(cap: Option<usize>) -> Self { Self(VecDeque::new(), cap) }
+    fn new(cap: Option<usize>) -> Self {
+        Self(VecDeque::new(), cap)
+    }
 
     fn push(&mut self, x: T) -> Result<(), T> {
         if self.1 == Some(self.0.len()) {
@@ -238,15 +248,29 @@ impl<T> Shared<T> {
                 listen_mode: 1,
             }),
             send_signal: Signal::default(),
-            recv_signal: if cap.is_some() { Some(Signal::default()) } else { None },
-            rendezvous_signal: if cap == Some(0) { Some(Signal::default()) } else { None },
+            recv_signal: if cap.is_some() {
+                Some(Signal::default())
+            } else {
+                None
+            },
+            rendezvous_signal: if cap == Some(0) {
+                Some(Signal::default())
+            } else {
+                None
+            },
         }
     }
 
     #[inline]
     fn lock_inner(&self) -> MutexGuard<Inner<T>> {
-        #[cfg(windows)] { self.inner.lock().unwrap() }
-        #[cfg(not(windows))] { self.inner.lock() }
+        #[cfg(windows)]
+        {
+            self.inner.lock().unwrap()
+        }
+        #[cfg(not(windows))]
+        {
+            self.inner.lock()
+        }
     }
 
     #[inline]
@@ -274,8 +298,14 @@ impl<T> Shared<T> {
     #[inline]
     #[cfg(feature = "async")]
     fn poll_inner(&self) -> Option<MutexGuard<'_, Inner<T>>> {
-        #[cfg(windows)] { self.inner.try_lock().ok() }
-        #[cfg(not(windows))] { self.inner.try_lock() }
+        #[cfg(windows)]
+        {
+            self.inner.try_lock().ok()
+        }
+        #[cfg(not(windows))]
+        {
+            self.inner.try_lock()
+        }
     }
 
     #[inline]
@@ -294,7 +324,7 @@ impl<T> Shared<T> {
         // If pushing fails, it's because the queue is full
         match inner.queue.push(msg) {
             Err(msg) => return Err((inner, TrySendError::Full(msg))),
-            Ok(()) => {},
+            Ok(()) => {}
         };
 
         self.send_notify(inner);
@@ -326,27 +356,29 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn send(
-        &self,
-        mut msg: T,
-        disconnected: &Cell<bool>,
-    ) -> Result<(), SendError<T>> {
+    fn send(&self, mut msg: T, disconnected: &Cell<bool>) -> Result<(), SendError<T>> {
         loop {
             // Attempt to send a message
             let inner = match self.try_send(msg, disconnected) {
                 Ok(()) => return Ok(()),
                 Err((_, TrySendError::Disconnected(msg))) => return Err(SendError(msg)),
-                Err((inner, TrySendError::Full(m))) => if let Some(sig) = self.rendezvous_signal.as_ref() {
-                    sig.do_then_wait_while(inner, |msg| {
-                        *msg = Some(m);
-                        // Notify the receiver of a new rendezvous message
-                        self.send_signal.notify_one(());
-                    }, |msg| msg.is_some());
-                    return Ok(());
-                } else {
-                    msg = m;
-                    inner
-                },
+                Err((inner, TrySendError::Full(m))) => {
+                    if let Some(sig) = self.rendezvous_signal.as_ref() {
+                        sig.do_then_wait_while(
+                            inner,
+                            |msg| {
+                                *msg = Some(m);
+                                // Notify the receiver of a new rendezvous message
+                                self.send_signal.notify_one(());
+                            },
+                            |msg| msg.is_some(),
+                        );
+                        return Ok(());
+                    } else {
+                        msg = m;
+                        inner
+                    }
+                }
             };
 
             if let Some(recv_signal) = self.recv_signal.as_ref() {
@@ -402,7 +434,7 @@ impl<T> Shared<T> {
                 Ok(msg)
             } else {
                 Err((inner, TryRecvError::Empty))
-            }
+            };
         }
 
         let msg = match inner.queue.pop() {
@@ -411,7 +443,7 @@ impl<T> Shared<T> {
             None if inner.sender_count == 0 => {
                 finished.set(true);
                 return Err((inner, TryRecvError::Disconnected));
-            },
+            }
             None => return Err((inner, TryRecvError::Empty)),
         };
 
@@ -429,12 +461,9 @@ impl<T> Shared<T> {
         #[cfg(feature = "select")]
         {
             // Notify send selectors
-            inner
-                .send_selectors
-                .iter()
-                .for_each(|(_, signal, token)| {
-                    signal.notify_one_with(|t| *t = *token, ());
-                });
+            inner.send_selectors.iter().for_each(|(_, signal, token)| {
+                signal.notify_one_with(|t| *t = *token, ());
+            });
         }
 
         #[cfg(feature = "async")]
@@ -453,11 +482,7 @@ impl<T> Shared<T> {
     }
 
     #[inline]
-    fn recv(
-        &self,
-        buf: &mut VecDeque<T>,
-        finished: &Cell<bool>,
-    ) -> Result<T, RecvError> {
+    fn recv(&self, buf: &mut VecDeque<T>, finished: &Cell<bool>) -> Result<T, RecvError> {
         loop {
             // Attempt to receive a message
             let mut i = 0;
@@ -466,7 +491,7 @@ impl<T> Shared<T> {
                     Ok(msg) => return Ok(msg),
                     Err((_, TryRecvError::Disconnected)) => return Err(RecvError::Disconnected),
                     Err((inner, TryRecvError::Empty)) if i == 3 => break inner,
-                    Err((_, TryRecvError::Empty)) => {},
+                    Err((_, TryRecvError::Empty)) => {}
                 };
                 thread::yield_now();
                 i += 1;
@@ -533,7 +558,9 @@ impl<T> Shared<T> {
     #[cfg(feature = "select")]
     #[inline]
     fn disconnect_send_selector(&self, id: usize) {
-        self.lock_inner().send_selectors.retain(|(s_id, _, _)| s_id != &id);
+        self.lock_inner()
+            .send_selectors
+            .retain(|(s_id, _, _)| s_id != &id);
     }
 
     #[cfg(feature = "select")]
@@ -566,7 +593,10 @@ impl<T> Sender<T> {
     /// receiver has been dropped, an error is returned. If the channel associated with this
     /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        self.shared.try_send(msg, &self.disconnected).map(|_| ()).map_err(|(_, err)| err)
+        self.shared
+            .try_send(msg, &self.disconnected)
+            .map(|_| ())
+            .map_err(|(_, err)| err)
     }
 }
 
@@ -589,7 +619,7 @@ impl<T> Clone for Sender<T> {
         //self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
         Self {
             shared: self.shared.clone(),
-            disconnected: Cell::new(false)
+            disconnected: Cell::new(false),
         }
     }
 }
@@ -602,7 +632,8 @@ impl<T> Drop for Sender<T> {
             let mut inner = self.shared.wait_inner();
             inner.sender_count -= 1;
             inner.sender_count
-        } == 0 {
+        } == 0
+        {
             self.shared.all_senders_disconnected();
         }
     }
@@ -624,7 +655,8 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.shared.recv(&mut self.buffer.borrow_mut(), &self.finished)
+        self.shared
+            .recv(&mut self.buffer.borrow_mut(), &self.finished)
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
@@ -633,18 +665,15 @@ impl<T> Receiver<T> {
         self.shared.recv_deadline(
             Instant::now().checked_add(timeout).unwrap(),
             &mut self.buffer.borrow_mut(),
-            &self.finished
+            &self.finished,
         )
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        self.shared.recv_deadline(
-            deadline,
-            &mut self.buffer.borrow_mut(),
-            &self.finished
-        )
+        self.shared
+            .recv_deadline(deadline, &mut self.buffer.borrow_mut(), &self.finished)
     }
 
     // Takes `&mut self` to avoid >1 task waiting on this channel
@@ -659,12 +688,11 @@ impl<T> Receiver<T> {
     /// Attempt to fetch an incoming value from the channel associated with this receiver,
     /// returning an error if the channel is empty or all channel senders have been dropped.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self
-            .shared
+        self.shared
             .try_recv(
                 || self.shared.wait_inner(),
                 &mut self.buffer.borrow_mut(),
-                &self.finished
+                &self.finished,
             )
             .map_err(|(_, err)| err)
     }
@@ -687,7 +715,10 @@ impl<T> Receiver<T> {
     pub fn drain(&self) -> Drain<T> {
         let mut queue = std::mem::replace(&mut *self.buffer.borrow_mut(), VecDeque::new());
         queue.append(&mut self.shared.take_remaining().0);
-        Drain { queue, _phantom: PhantomData }
+        Drain {
+            queue,
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -795,7 +826,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
             shared,
             buffer: RefCell::new(VecDeque::new()),
             finished: Cell::new(false),
-            _phantom_cell: UnsafeCell::new(())
+            _phantom_cell: UnsafeCell::new(()),
         },
     )
 }
@@ -836,7 +867,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
             shared,
             buffer: RefCell::new(VecDeque::new()),
             finished: Cell::new(false),
-            _phantom_cell: UnsafeCell::new(())
+            _phantom_cell: UnsafeCell::new(()),
         },
     )
 }
