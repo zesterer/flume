@@ -124,6 +124,12 @@ impl fmt::Display for RecvTimeoutError {
 
 impl std::error::Error for RecvTimeoutError {}
 
+pub enum TryRecvTimeoutError {
+    Empty,
+    Timeout,
+    Disconnected,
+}
+
 #[derive(Default)]
 struct Signal<T = ()> {
     lock: Mutex<T>,
@@ -161,6 +167,15 @@ impl<T> Signal<T> {
         self.waiters.fetch_sub(1, Ordering::Relaxed);
     }
 
+    fn wait_timeout_while<G>(&self, sync_guard: G, dur: Duration, cond: impl FnMut(&mut T) -> bool) -> WaitTimeoutResult {
+        let guard = self.lock.lock().unwrap();
+        self.waiters.fetch_add(1, Ordering::Relaxed);
+        drop(sync_guard);
+        let (_guard, timeout) = self.trigger.wait_timeout_while(guard, dur, cond).unwrap();
+        self.waiters.fetch_sub(1, Ordering::Relaxed);
+        timeout
+    }
+
     fn notify_one<G>(&self, sync_guard: G) {
         if self.waiters.load(Ordering::Relaxed) > 0 {
             drop(sync_guard);
@@ -169,7 +184,7 @@ impl<T> Signal<T> {
         }
     }
 
-    fn notify_one_with<G>(&self, f: impl FnOnce(&mut T), sync_guard: G) {
+    fn notify_one_with<G>(&self, sync_guard: G, f: impl FnOnce(&mut T)) {
         if self.waiters.load(Ordering::Relaxed) > 0 {
             drop(sync_guard);
             let mut guard = self.lock.lock().unwrap();
@@ -310,7 +325,7 @@ impl<T> Sender<T> {
                     return Err(TrySendError::Disconnected(msg));
                 } else if let Some(recv) = pending.receivers.pop_front() {
                     debug_assert!(pending.queue.len() == 0);
-                    recv.notify_one_with(|m| *m = Some(msg), ());
+                    recv.notify_one_with((), |m| *m = Some(msg));
                     Ok(())
                 } else if pending.queue.len() < *cap {
                     pending.queue.push_back(msg);
@@ -421,7 +436,7 @@ fn pull_pending<T>(
     while pending.queue.len() < effective_cap {
         if let Some(signal) = pending.senders.pop_front() {
             let mut msg = None;
-            signal.notify_one_with(|m| msg = m.take(), ());
+            signal.notify_one_with((), |m| msg = m.take());
             if let Some(msg) = msg {
                 pending.queue.push_back(msg);
             }
@@ -432,7 +447,7 @@ fn pull_pending<T>(
 }
 
 impl<T> Receiver<T> {
-    fn recv_inner(&self, block: bool) -> Result<T, TryRecvError> {
+    fn recv_inner(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
@@ -440,21 +455,32 @@ impl<T> Receiver<T> {
                 if let Some(msg) = pending.queue.pop_front() {
                     Ok(msg)
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
-                    return Err(TryRecvError::Disconnected);
-                } else if block {
+                    return Err(TryRecvTimeoutError::Disconnected);
+                } else if let Some(deadline) = block {
                     let unblock_signal = self.unblock_signal.as_ref().unwrap();
                     pending.receivers.push_back(unblock_signal.clone());
 
-                    unblock_signal.wait_while(pending, |msg| {
-                        msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed)
-                    });
+                    if let Some(deadline) = deadline {
+                        let now = Instant::now();
+                        if unblock_signal.wait_timeout_while(
+                            pending,
+                            deadline.duration_since(now),
+                            |msg| msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed),
+                        ).timed_out() {
+                            return Err(TryRecvTimeoutError::Timeout);
+                        }
+                    } else {
+                        unblock_signal.wait_while(pending, |msg| {
+                            msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed)
+                        });
+                    }
 
                     unblock_signal
                         .lock()
                         .take()
-                        .ok_or(TryRecvError::Disconnected)
+                        .ok_or(TryRecvTimeoutError::Disconnected)
                 } else {
-                    Err(TryRecvError::Empty)
+                    Err(TryRecvTimeoutError::Empty)
                 }
             },
             Channel::Unbounded { send_signal, queue } => loop {
@@ -462,11 +488,21 @@ impl<T> Receiver<T> {
                 if let Some(msg) = queue.pop_front() {
                     break Ok(msg);
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
-                    break Err(TryRecvError::Disconnected);
-                } else if block {
-                    send_signal.wait(queue);
+                    break Err(TryRecvTimeoutError::Disconnected);
+                } else if let Some(deadline) = block {
+                    if let Some(deadline) = deadline {
+                        let now = Instant::now();
+                        if send_signal
+                            .wait_timeout(deadline.duration_since(now), queue)
+                            .timed_out()
+                        {
+                            break Err(TryRecvTimeoutError::Timeout);
+                        }
+                    } else {
+                        send_signal.wait(queue);
+                    }
                 } else {
-                    break Err(TryRecvError::Empty);
+                    break Err(TryRecvTimeoutError::Empty);
                 }
             },
         }
@@ -476,15 +512,19 @@ impl<T> Receiver<T> {
     /// Attempt to fetch an incoming value from the channel associated with this receiver,
     /// returning an error if the channel is empty or all channel senders have been dropped.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.recv_inner(false)
+        self.recv_inner(None).map_err(|err| match err {
+            TryRecvTimeoutError::Disconnected => TryRecvError::Disconnected,
+            TryRecvTimeoutError::Empty => TryRecvError::Empty,
+            _ => unreachable!(),
+        })
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.recv_inner(true).map_err(|err| match err {
-            TryRecvError::Disconnected => RecvError::Disconnected,
-            TryRecvError::Empty => unreachable!(),
+        self.recv_inner(Some(None)).map_err(|err| match err {
+            TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
+            _ => unreachable!(),
         })
     }
 
@@ -497,47 +537,11 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        match &self.shared.chan {
-            Channel::Bounded { cap, pending } => loop {
-
-                todo!("recv_deadline for bounded")
-                /*
-                let (mut queue, mut pending) = (wait_lock(&queue), wait_lock(&pending));
-                pull_pending(*cap, &mut pending, &mut queue);
-                if let Some(msg) = queue.pop_front() {
-                    break Ok(msg);
-                } else if self.shared.disconnected.load(Ordering::Relaxed) {
-                    break Err(RecvTimeoutError::Disconnected);
-                } else {
-                    let now = Instant::now();
-                    if self
-                        .shared
-                        .send_signal
-                        .wait_timeout(deadline.duration_since(now), (queue, pending))
-                        .timed_out()
-                    {
-                        break Err(RecvTimeoutError::Timeout);
-                    }
-                }
-                */
-            },
-            Channel::Unbounded { queue, send_signal } => loop {
-                let mut queue = wait_lock(&queue);
-                if let Some(msg) = queue.pop_front() {
-                    break Ok(msg);
-                } else if self.shared.disconnected.load(Ordering::Relaxed) {
-                    break Err(RecvTimeoutError::Disconnected);
-                } else {
-                    let now = Instant::now();
-                    if send_signal
-                        .wait_timeout(deadline.duration_since(now), queue)
-                        .timed_out()
-                    {
-                        break Err(RecvTimeoutError::Timeout);
-                    }
-                }
-            },
-        }
+        self.recv_inner(Some(Some(deadline))).map_err(|err| match err {
+            TryRecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
+            TryRecvTimeoutError::Timeout => RecvTimeoutError::Disconnected,
+            _ => unreachable!(),
+        })
     }
 
     // Takes `&mut self` to avoid >1 task waiting on this channel
