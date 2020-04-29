@@ -29,6 +29,7 @@ use std::{
     cell::{UnsafeCell, RefCell},
     marker::PhantomData,
     thread,
+    fmt,
 };
 #[cfg(windows)]
 use std::sync::{Mutex as InnerMutex, MutexGuard};
@@ -47,17 +48,46 @@ use std::cell::Cell;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SendError<T>(pub T);
 
+impl<T> fmt::Display for SendError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        "sending on a closed channel".fmt(f)
+    }
+}
+
+impl<T> std::error::Error for SendError<T> where T: fmt::Debug {}
+
 /// An error that may be emitted when attempting to wait for a value on a receiver.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RecvError {
     Disconnected,
 }
 
+impl fmt::Display for RecvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RecvError::Disconnected => "receiving on a closed channel".fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RecvError {}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TrySendError<T> {
     Full(T),
     Disconnected(T),
 }
+
+impl<T> fmt::Display for TrySendError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrySendError::Full(..) => "sending on a full channel".fmt(f),
+            TrySendError::Disconnected(..) => "sending on a closed channel".fmt(f),
+        }
+    }
+}
+
+impl<T> std::error::Error for TrySendError<T> where T: fmt::Debug {}
 
 /// An error that may be emitted when attempting to fetch a value on a receiver.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -66,12 +96,34 @@ pub enum TryRecvError {
     Disconnected,
 }
 
+impl fmt::Display for TryRecvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TryRecvError::Empty => "receiving on an empty channel".fmt(f),
+            TryRecvError::Disconnected => "receiving on a closed channel".fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for TryRecvError {}
+
 /// An error that may be emitted when attempting to wait for a value on a receiver with a timeout.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RecvTimeoutError {
     Timeout,
     Disconnected,
 }
+
+impl fmt::Display for RecvTimeoutError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RecvTimeoutError::Timeout => "timed out waiting on channel".fmt(f),
+            RecvTimeoutError::Disconnected => "channel is empty and sending half is closed".fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RecvTimeoutError {}
 
 #[derive(Default)]
 struct Signal<T = ()> {
