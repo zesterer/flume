@@ -4,6 +4,7 @@ use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+    fmt,
 };
 use crate::*;
 use futures::{Stream, stream::FusedStream, future::FusedFuture, Sink};
@@ -151,7 +152,16 @@ impl<T> FusedStream for Receiver<T> {
 /// Error returned when a send future or sink linked to a disconnected sender is polled. To retrieve
 /// the associated message, call the `into_message` method of the `SendFuture` or `into_pending`
 /// method of the `SinkSender`.
+#[derive(Debug)]
 pub struct Disconnected;
+
+impl fmt::Display for Disconnected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        "sending on a disconnected channel".fmt(f)
+    }
+}
+
+impl std::error::Error for Disconnected {}
 
 pub struct SendFuture<'a, T> {
     send: &'a Sender<T>,
