@@ -1,3 +1,4 @@
+#[cfg(feature = "async")]
 use flume::*;
 
 #[cfg(feature = "async")]

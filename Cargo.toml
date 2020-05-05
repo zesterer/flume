@@ -9,6 +9,7 @@ keywords = ["mpsc", "fifo", "channel", "thread", "fast"]
 categories = ["concurrency", "data-structures"]
 license = "Apache-2.0/MIT"
 readme = "README.md"
+exclude = ["misc"]
 
 [features]
 select = []

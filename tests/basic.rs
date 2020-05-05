@@ -36,6 +36,28 @@ fn iter_threaded() {
 }
 
 #[test]
+fn send_timeout() {
+    let (tx, rx) = bounded(1);
+
+    assert!(tx.send_timeout(42, Duration::from_millis(350)).is_ok());
+
+    let dur = Duration::from_millis(350);
+    let then = Instant::now();
+    assert!(tx.send_timeout(43, dur).is_err());
+    let now = Instant::now();
+
+    let max_error = Duration::from_millis(1);
+    assert!(now.duration_since(then) < dur.checked_add(max_error).unwrap());
+    assert!(now.duration_since(then) > dur.checked_sub(max_error).unwrap());
+
+    assert_eq!(rx.drain().count(), 1);
+
+    drop(rx);
+
+    assert!(tx.send_timeout(42, Duration::from_millis(350)).is_err());
+}
+
+#[test]
 fn recv_timeout() {
     let (tx, rx) = unbounded();
 
