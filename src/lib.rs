@@ -248,6 +248,7 @@ struct Shared<T> {
     chan: Channel<T>,
     disconnected: AtomicBool,
     sender_count: AtomicUsize,
+    receiver_count: AtomicUsize,
 }
 
 impl<T> Shared<T> {
@@ -270,28 +271,13 @@ impl<T> Shared<T> {
             },
             disconnected: AtomicBool::new(false),
             sender_count: AtomicUsize::new(1),
+            receiver_count: AtomicUsize::new(1),
         }
     }
 
-    /// Inform the receiver that all senders have been dropped
-    #[inline]
-    fn all_senders_disconnected(&self) {
-        self.disconnected.store(true, Ordering::Relaxed);
-        match &self.chan {
-            Channel::Bounded { pending, .. } => {
-                let pending = pending.lock();
-                pending.senders.iter().for_each(|s| s.notify_all(()));
-                pending.receivers.iter().for_each(|s| s.notify_all(()));
-            },
-            Channel::Unbounded { queue, send_signal } => {
-                let queue = queue.lock();
-                send_signal.notify_all(queue);
-            },
-        }
-    }
-
-    #[inline]
-    fn receiver_disconnected(&self) {
+    /// Disconnect anything listening on this channel (this will not prevent receivers receiving
+    /// items that have already been sent)
+    fn disconnect_all(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
         match &self.chan {
             Channel::Bounded { pending, .. } => {
@@ -310,14 +296,14 @@ impl<T> Shared<T> {
 /// A transmitting end of a channel.
 pub struct Sender<T> {
     shared: Arc<Shared<T>>,
-    unblock_signal: Option<Arc<Signal<Option<T>>>>,
+    sig: Option<Arc<Signal<Option<T>>>>,
     /// Used to prevent Sync being implemented for this type - we never actually use it!
     /// TODO: impl<T> !Sync for Receiver<T> {} when negative traits are stable
     _phantom_cell: UnsafeCell<()>,
 }
 
 impl<T> Sender<T> {
-    fn send_inner(&self, msg: T, block: bool) -> Result<(), TrySendError<T>> {
+    fn send_inner(&self, msg: T, block: bool, sig: &Option<Arc<Signal<Option<T>>>>) -> Result<(), TrySendError<T>> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
@@ -331,15 +317,15 @@ impl<T> Sender<T> {
                     pending.queue.push_back(msg);
                     Ok(())
                 } else if block {
-                    let unblock_signal = self.unblock_signal.as_ref().unwrap();
-                    *unblock_signal.lock() = Some(msg);
-                    pending.senders.push_back(unblock_signal.clone());
+                    let sig = sig.as_ref().unwrap();
+                    *sig.lock() = Some(msg);
+                    pending.senders.push_back(sig.clone());
 
-                    unblock_signal.wait_while(pending, |msg| {
+                    sig.wait_while(pending, |msg| {
                         msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed)
                     });
 
-                    if let Some(msg) = unblock_signal.lock().take() {
+                    if let Some(msg) = sig.lock().take() {
                         Err(TrySendError::Disconnected(msg))
                     } else {
                         Ok(())
@@ -364,14 +350,14 @@ impl<T> Sender<T> {
     /// Send a value into the channel, returning an error if the channel receiver has
     /// been dropped. If the channel is bounded and is full, this method will block.
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        self.send_inner(msg, false)
+        self.send_inner(msg, false, &self.sig)
     }
 
     /// Attempt to send a value into the channel. If the channel is bounded and full, or the
     /// receiver has been dropped, an error is returned. If the channel associated with this
     /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        self.send_inner(msg, true).map_err(|err| match err {
+        self.send_inner(msg, true, &self.sig).map_err(|err| match err {
             TrySendError::Disconnected(msg) => SendError(msg),
             TrySendError::Full(_) => unreachable!(),
         })
@@ -392,24 +378,14 @@ impl<T> Sender<T> {
 }
 
 impl<T> Clone for Sender<T> {
-    /// Clone this sender. [`Sender`] acts as a handle to a channel, and the channel will only be
-    /// cleaned up when all senders and the receiver have been dropped.
+    /// Clone this sender. [`Sender`] acts as a handle to the ending a channel. Remaining channel
+    /// contents will only be cleaned up when all senders and the receiver have been dropped.
     fn clone(&self) -> Self {
         self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
         Self {
             shared: self.shared.clone(),
-            unblock_signal: Some(Arc::new(Signal::default())),
+            sig: Some(Arc::new(Signal::default())),
             _phantom_cell: UnsafeCell::new(()),
-        }
-    }
-}
-
-impl<T> Drop for Sender<T> {
-    fn drop(&mut self) {
-        // Notify the receiver that all senders have been dropped if the number of senders drops
-        // to 0.
-        if self.shared.sender_count.fetch_sub(1, Ordering::Relaxed) == 1 {
-            self.shared.all_senders_disconnected();
         }
     }
 }
@@ -420,10 +396,19 @@ impl<T> fmt::Debug for Sender<T> {
     }
 }
 
+impl<T> Drop for Sender<T> {
+    fn drop(&mut self) {
+        // Notify receivers that all senders have been dropped if the number of senders drops to 0.
+        if self.shared.sender_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.shared.disconnect_all();
+        }
+    }
+}
+
 /// The receiving end of a channel.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
-    unblock_signal: Option<Arc<Signal<Option<T>>>>,
+    sig: Arc<Signal<Option<T>>>,
     /// Used to prevent Sync being implemented for this type - we never actually use it!
     /// TODO: impl<T> !Sync for Receiver<T> {} when negative traits are stable
     _phantom_cell: UnsafeCell<()>,
@@ -447,7 +432,7 @@ fn pull_pending<T>(
 }
 
 impl<T> Receiver<T> {
-    fn recv_inner(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
+    fn recv_inner(&self, block: Option<Option<Instant>>, sig: &Arc<Signal<Option<T>>>) -> Result<T, TryRecvTimeoutError> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
@@ -457,12 +442,11 @@ impl<T> Receiver<T> {
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
                     return Err(TryRecvTimeoutError::Disconnected);
                 } else if let Some(deadline) = block {
-                    let unblock_signal = self.unblock_signal.as_ref().unwrap();
-                    pending.receivers.push_back(unblock_signal.clone());
+                    pending.receivers.push_back(sig.clone());
 
                     if let Some(deadline) = deadline {
                         let now = Instant::now();
-                        if unblock_signal.wait_timeout_while(
+                        if sig.wait_timeout_while(
                             pending,
                             deadline.duration_since(now),
                             |msg| msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed),
@@ -470,12 +454,12 @@ impl<T> Receiver<T> {
                             return Err(TryRecvTimeoutError::Timeout);
                         }
                     } else {
-                        unblock_signal.wait_while(pending, |msg| {
+                        sig.wait_while(pending, |msg| {
                             msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed)
                         });
                     }
 
-                    unblock_signal
+                    sig
                         .lock()
                         .take()
                         .ok_or(TryRecvTimeoutError::Disconnected)
@@ -512,7 +496,7 @@ impl<T> Receiver<T> {
     /// Attempt to fetch an incoming value from the channel associated with this receiver,
     /// returning an error if the channel is empty or all channel senders have been dropped.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.recv_inner(None).map_err(|err| match err {
+        self.recv_inner(None, &self.sig).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => TryRecvError::Disconnected,
             TryRecvTimeoutError::Empty => TryRecvError::Empty,
             _ => unreachable!(),
@@ -522,7 +506,7 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.recv_inner(Some(None)).map_err(|err| match err {
+        self.recv_inner(Some(None), &self.sig).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
             _ => unreachable!(),
         })
@@ -537,7 +521,7 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        self.recv_inner(Some(Some(deadline))).map_err(|err| match err {
+        self.recv_inner(Some(Some(deadline)), &self.sig).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
             TryRecvTimeoutError::Timeout => RecvTimeoutError::Disconnected,
             _ => unreachable!(),
@@ -583,24 +567,42 @@ impl<T> Receiver<T> {
     }
 }
 
-impl<T> IntoIterator for Receiver<T> {
-    type Item = T;
-    type IntoIter = IntoIter<T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        IntoIter { receiver: self }
-    }
-}
-
-impl<T> Drop for Receiver<T> {
-    fn drop(&mut self) {
-        self.shared.receiver_disconnected();
+impl<T> Clone for Receiver<T> {
+    /// Clone this receiver. [`Receiver`] acts as a handle to the ending a channel. Remaining
+    /// channel contents will only be cleaned up when all senders and the receiver have been
+    /// dropped.
+    fn clone(&self) -> Self {
+        self.shared.receiver_count.fetch_add(1, Ordering::Relaxed);
+        Self {
+            shared: self.shared.clone(),
+            sig: Arc::new(Signal::default()),
+            _phantom_cell: UnsafeCell::new(()),
+        }
     }
 }
 
 impl<T> fmt::Debug for Receiver<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Receiver").finish()
+    }
+}
+
+impl<T> Drop for Receiver<T> {
+    fn drop(&mut self) {
+        // Notify senders that all receivers have been dropped if the number of receivers drops
+        // to 0.
+        if self.shared.receiver_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.shared.disconnect_all();
+        }
+    }
+}
+
+impl<T> IntoIterator for Receiver<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter { receiver: self }
     }
 }
 
@@ -686,12 +688,12 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     (
         Sender {
             shared: shared.clone(),
-            unblock_signal: None,
+            sig: None,
             _phantom_cell: UnsafeCell::new(())
         },
         Receiver {
             shared,
-            unblock_signal: Some(Arc::new(Signal::default())),
+            sig: Arc::new(Signal::default()),
             _phantom_cell: UnsafeCell::new(())
         },
     )
@@ -727,12 +729,12 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     (
         Sender {
             shared: shared.clone(),
-            unblock_signal: Some(Arc::new(Signal::default())),
+            sig: Some(Arc::new(Signal::default())),
             _phantom_cell: UnsafeCell::new(())
         },
         Receiver {
             shared,
-            unblock_signal: Some(Arc::new(Signal::default())),
+            sig: Arc::new(Signal::default()),
             _phantom_cell: UnsafeCell::new(())
         },
     )

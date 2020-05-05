@@ -181,6 +181,38 @@ fn test_hydra<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize) {
     });
 }
 
+fn test_kitsune<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize)
+    where S::Receiver: Clone
+{
+    let (out_tx, out_rx) = S::unbounded();
+    let (in_tx, in_rx) = S::unbounded();
+
+    for _ in 0..thread_num {
+        let in_tx = in_tx.clone();
+        let out_rx = out_rx.clone();
+
+        thread::spawn(move || {
+            for msg in out_rx.iter() {
+                in_tx.send(msg);
+            }
+        });
+    }
+
+    b.iter(|| {
+        for _ in 0..thread_num {
+            for _ in 0..msg_num {
+                out_tx.send(Default::default());
+            }
+        }
+
+        for _ in 0..thread_num {
+            for _ in 0..msg_num {
+                black_box(in_rx.recv());
+            }
+        }
+    });
+}
+
 fn test_robin_u<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize) {
     let (mut main_tx, main_rx) = S::unbounded();
 
@@ -346,6 +378,36 @@ fn hydra_4t_10000m(b: &mut Criterion) {
     b.bench_function("hydra-4t-10000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 4, 10000));
 }
 
+fn kitsune_32t_1m(b: &mut Criterion) {
+    b.bench_function("kitsune-32t-1m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 32, 1));
+    b.bench_function("kitsune-32t-1m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 32, 1));
+    //b.bench_function("kitsune-32t-1m-std", |b| test_kitsune::<mpsc::Sender<u32>>(b, 32, 1));
+}
+
+fn kitsune_32t_1000m(b: &mut Criterion) {
+    b.bench_function("kitsune-32t-1000m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 32, 1000));
+    b.bench_function("kitsune-32t-1000m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 32, 1000));
+    //b.bench_function("kitsune-32t-1000m-std", |b| test_kitsune::<mpsc::Sender<u32>>(b, 32, 1000));
+}
+
+fn kitsune_256t_1m(b: &mut Criterion) {
+    b.bench_function("kitsune-256t-1m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 256, 1));
+    b.bench_function("kitsune-256t-1m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 256, 1));
+    //b.bench_function("kitsune-256t-1m-std", |b| test_kitsune::<mpsc::Sender<u32>>(b, 256, 1));
+}
+
+fn kitsune_1t_1000m(b: &mut Criterion) {
+    b.bench_function("kitsune-1t-1000m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 1, 1000));
+    b.bench_function("kitsune-1t-1000m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 1, 1000));
+    //b.bench_function("kitsune-1t-1000m-std", |b| test_kitsune::<mpsc::Sender<u32>>(b, 1, 1000));
+}
+
+fn kitsune_4t_10000m(b: &mut Criterion) {
+    b.bench_function("kitsune-4t-10000m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 4, 10000));
+    b.bench_function("kitsune-4t-10000m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 4, 10000));
+    //b.bench_function("kitsune-4t-10000m-std", |b| test_kitsune::<mpsc::Sender<u32>>(b, 4, 10000));
+}
+
 fn robin_u_32t_1m(b: &mut Criterion) {
     b.bench_function("robin-u-32t-1m-flume", |b| test_robin_u::<flume::Sender<u32>>(b, 32, 1));
     b.bench_function("robin-u-32t-1m-crossbeam", |b| test_robin_u::<crossbeam_channel::Sender<u32>>(b, 32, 1));
@@ -389,9 +451,9 @@ fn mpsc_bounded_4t(b: &mut Criterion) {
 
 criterion_group!(
     compare,
-    // create,
-    // oneshot,
-    // inout,
+    create,
+    oneshot,
+    inout,
     mpsc_bounded_no_wait_4t,
     mpsc_bounded_4t,
     hydra_32t_1m,
@@ -399,6 +461,11 @@ criterion_group!(
     hydra_256t_1m,
     hydra_1t_1000m,
     hydra_4t_10000m,
+    kitsune_32t_1m,
+    kitsune_32t_1000m,
+    kitsune_256t_1m,
+    kitsune_1t_1000m,
+    kitsune_4t_10000m,
     robin_u_32t_1m,
     robin_u_4t_1000m,
     robin_b_32t_16m,
