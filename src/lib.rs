@@ -26,7 +26,6 @@ use std::{
     collections::VecDeque,
     sync::{self, Arc, Condvar, Mutex, WaitTimeoutResult, atomic::{AtomicUsize, AtomicBool, Ordering}},
     time::{Duration, Instant},
-    cell::UnsafeCell,
     marker::PhantomData,
     thread,
     fmt,
@@ -131,6 +130,21 @@ pub enum TryRecvTimeoutError {
 }
 
 #[derive(Default)]
+pub struct Depot<T> {
+    inner: spin::Mutex<Option<T>>,
+}
+
+impl<T> Depot<T> {
+    #[inline(always)]
+    pub fn with_one<R>(&self, make_fn: impl FnOnce() -> T, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut item = self.inner.lock().take().unwrap_or_else(make_fn);
+        let ret = f(&mut item);
+        self.inner.lock().replace(item);
+        ret
+    }
+}
+
+#[derive(Default)]
 struct Signal<T = ()> {
     lock: Mutex<T>,
     trigger: Condvar,
@@ -219,6 +233,7 @@ fn wait_lock<'a, T>(lock: &'a InnerMutex<T>) -> MutexGuard<'a, T> {
 }
 
 #[inline]
+#[cfg(feature = "async")]
 fn poll_lock<'a, T>(lock: &'a InnerMutex<T>) -> Option<MutexGuard<'a, T>> {
     lock.try_lock()
 }
@@ -296,14 +311,12 @@ impl<T> Shared<T> {
 /// A transmitting end of a channel.
 pub struct Sender<T> {
     shared: Arc<Shared<T>>,
-    sig: Option<Arc<Signal<Option<T>>>>,
-    /// Used to prevent Sync being implemented for this type - we never actually use it!
-    /// TODO: impl<T> !Sync for Receiver<T> {} when negative traits are stable
-    _phantom_cell: UnsafeCell<()>,
+    sig: Depot<Arc<Signal<Option<T>>>>,
 }
 
 impl<T> Sender<T> {
-    fn send_inner(&self, msg: T, block: bool, sig: &Option<Arc<Signal<Option<T>>>>) -> Result<(), TrySendError<T>> {
+    #[inline(always)]
+    fn send_inner(&self, msg: T, block: bool) -> Result<(), TrySendError<T>> {
         match &self.shared.chan {
             Channel::Bounded { cap, pending } => {
                 let mut pending = wait_lock(&pending);
@@ -317,19 +330,23 @@ impl<T> Sender<T> {
                     pending.queue.push_back(msg);
                     Ok(())
                 } else if block {
-                    let sig = sig.as_ref().unwrap();
-                    *sig.lock() = Some(msg);
-                    pending.senders.push_back(sig.clone());
+                    self.sig.with_one(
+                        || Arc::new(Signal::default()),
+                        move |sig| {
+                            *sig.lock() = Some(msg);
+                            pending.senders.push_back(sig.clone());
 
-                    sig.wait_while(pending, |msg| {
-                        msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed)
-                    });
+                            sig.wait_while(pending, |msg| {
+                                msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed)
+                            });
 
-                    if let Some(msg) = sig.lock().take() {
-                        Err(TrySendError::Disconnected(msg))
-                    } else {
-                        Ok(())
-                    }
+                            if let Some(msg) = sig.lock().take() {
+                                Err(TrySendError::Disconnected(msg))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
                 } else {
                     Err(TrySendError::Full(msg))
                 }
@@ -350,14 +367,14 @@ impl<T> Sender<T> {
     /// Send a value into the channel, returning an error if the channel receiver has
     /// been dropped. If the channel is bounded and is full, this method will block.
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        self.send_inner(msg, false, &self.sig)
+        self.send_inner(msg, false)
     }
 
     /// Attempt to send a value into the channel. If the channel is bounded and full, or the
     /// receiver has been dropped, an error is returned. If the channel associated with this
     /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        self.send_inner(msg, true, &self.sig).map_err(|err| match err {
+        self.send_inner(msg, true).map_err(|err| match err {
             TrySendError::Disconnected(msg) => SendError(msg),
             TrySendError::Full(_) => unreachable!(),
         })
@@ -384,8 +401,7 @@ impl<T> Clone for Sender<T> {
         self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
         Self {
             shared: self.shared.clone(),
-            sig: Some(Arc::new(Signal::default())),
-            _phantom_cell: UnsafeCell::new(()),
+            sig: Depot::default(),
         }
     }
 }
@@ -408,10 +424,7 @@ impl<T> Drop for Sender<T> {
 /// The receiving end of a channel.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
-    sig: Arc<Signal<Option<T>>>,
-    /// Used to prevent Sync being implemented for this type - we never actually use it!
-    /// TODO: impl<T> !Sync for Receiver<T> {} when negative traits are stable
-    _phantom_cell: UnsafeCell<()>,
+    sig: Depot<Arc<Signal<Option<T>>>>,
 }
 
 fn pull_pending<T>(
@@ -432,37 +445,61 @@ fn pull_pending<T>(
 }
 
 impl<T> Receiver<T> {
-    fn recv_inner(&self, block: Option<Option<Instant>>, sig: &Arc<Signal<Option<T>>>) -> Result<T, TryRecvTimeoutError> {
+    #[inline(always)]
+    fn recv_inner(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
         match &self.shared.chan {
-            Channel::Bounded { cap, pending } => {
-                let mut pending = wait_lock(&pending);
+            Channel::Bounded { cap, pending: pending_lock } => {
+                let mut pending = wait_lock(&pending_lock);
                 pull_pending(*cap + 1, &mut pending);
                 if let Some(msg) = pending.queue.pop_front() {
                     Ok(msg)
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
                     return Err(TryRecvTimeoutError::Disconnected);
                 } else if let Some(deadline) = block {
-                    pending.receivers.push_back(sig.clone());
+                    self.sig.with_one(
+                        || Arc::new(Signal::default()),
+                        move |sig| {
+                            pending.receivers.push_back(sig.clone());
 
-                    if let Some(deadline) = deadline {
-                        let now = Instant::now();
-                        if sig.wait_timeout_while(
-                            pending,
-                            deadline.duration_since(now),
-                            |msg| msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed),
-                        ).timed_out() {
-                            return Err(TryRecvTimeoutError::Timeout);
-                        }
-                    } else {
-                        sig.wait_while(pending, |msg| {
-                            msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed)
-                        });
-                    }
+                            if let Some(deadline) = deadline {
+                                let now = Instant::now();
+                                if sig.wait_timeout_while(
+                                    pending,
+                                    deadline.duration_since(now),
+                                    |msg| msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed),
+                                ).timed_out() {
+                                    // There is a problem here. When calling `rx.recv()`, a signal
+                                    // gets inserted into the receiver queue to be matched with
+                                    // a sent item later, causing it to unblock. However, calling
+                                    // `rx.recv_timeout()` may exit early, leaving a "phoney"
+                                    // signal in the receiver queue that is no longer valid. To
+                                    // resolve this, we do something a little hacky: run through
+                                    // the receiver queue, find our signal, and remove it. This is
+                                    // expensive, but thankfully it's an edge-case that hopefully
+                                    // won't have an impact on performance-critical code (after
+                                    // all, this only happens when a timeout has occurred).
+                                    let mut pending = wait_lock(&pending_lock);
+                                    // Remove our signal
+                                    pending.receivers.retain(|slot| !Arc::ptr_eq(slot, sig));
+                                    // Check one last time for a value - perhaps one got added in
+                                    // the meantime?
+                                    return match sig.lock().take() {
+                                        Some(msg) => Ok(msg),
+                                        None => Err(TryRecvTimeoutError::Timeout),
+                                    };
+                                }
+                            } else {
+                                sig.wait_while(pending, |msg| {
+                                    msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed)
+                                });
+                            }
 
-                    sig
-                        .lock()
-                        .take()
-                        .ok_or(TryRecvTimeoutError::Disconnected)
+                            sig
+                                .lock()
+                                .take()
+                                .ok_or(TryRecvTimeoutError::Disconnected)
+                        },
+                    )
                 } else {
                     Err(TryRecvTimeoutError::Empty)
                 }
@@ -496,7 +533,7 @@ impl<T> Receiver<T> {
     /// Attempt to fetch an incoming value from the channel associated with this receiver,
     /// returning an error if the channel is empty or all channel senders have been dropped.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.recv_inner(None, &self.sig).map_err(|err| match err {
+        self.recv_inner(None).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => TryRecvError::Disconnected,
             TryRecvTimeoutError::Empty => TryRecvError::Empty,
             _ => unreachable!(),
@@ -506,8 +543,18 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.recv_inner(Some(None), &self.sig).map_err(|err| match err {
+        self.recv_inner(Some(None)).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
+            _ => unreachable!(),
+        })
+    }
+
+    /// Wait for an incoming value from the channel associated with this receiver, returning an
+    /// error if all channel senders have been dropped or the deadline has passed.
+    pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
+        self.recv_inner(Some(Some(deadline))).map_err(|err| match err {
+            TryRecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
+            TryRecvTimeoutError::Timeout => RecvTimeoutError::Disconnected,
             _ => unreachable!(),
         })
     }
@@ -516,16 +563,6 @@ impl<T> Receiver<T> {
     /// error if all channel senders have been dropped or the timeout has expired.
     pub fn recv_timeout(&self, dur: Duration) -> Result<T, RecvTimeoutError> {
         self.recv_deadline(Instant::now().checked_add(dur).unwrap())
-    }
-
-    /// Wait for an incoming value from the channel associated with this receiver, returning an
-    /// error if all channel senders have been dropped or the deadline has passed.
-    pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        self.recv_inner(Some(Some(deadline)), &self.sig).map_err(|err| match err {
-            TryRecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
-            TryRecvTimeoutError::Timeout => RecvTimeoutError::Disconnected,
-            _ => unreachable!(),
-        })
     }
 
     // Takes `&mut self` to avoid >1 task waiting on this channel
@@ -575,8 +612,7 @@ impl<T> Clone for Receiver<T> {
         self.shared.receiver_count.fetch_add(1, Ordering::Relaxed);
         Self {
             shared: self.shared.clone(),
-            sig: Arc::new(Signal::default()),
-            _phantom_cell: UnsafeCell::new(()),
+            sig: Depot::default(),
         }
     }
 }
@@ -688,13 +724,11 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     (
         Sender {
             shared: shared.clone(),
-            sig: None,
-            _phantom_cell: UnsafeCell::new(())
+            sig: Depot::default(),
         },
         Receiver {
             shared,
-            sig: Arc::new(Signal::default()),
-            _phantom_cell: UnsafeCell::new(())
+            sig: Depot::default(),
         },
     )
 }
@@ -729,13 +763,11 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     (
         Sender {
             shared: shared.clone(),
-            sig: Some(Arc::new(Signal::default())),
-            _phantom_cell: UnsafeCell::new(())
+            sig: Depot::default(),
         },
         Receiver {
             shared,
-            sig: Arc::new(Signal::default()),
-            _phantom_cell: UnsafeCell::new(())
+            sig: Depot::default(),
         },
     )
 }

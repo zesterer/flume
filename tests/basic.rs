@@ -72,6 +72,17 @@ fn recv_deadline() {
 }
 
 #[test]
+fn recv_timeout_missed_send() {
+    let (tx, rx) = bounded(10);
+
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+
+    tx.send(42).unwrap();
+
+    assert_eq!(rx.recv(), Ok(42));
+}
+
+#[test]
 fn disconnect_tx() {
     let (tx, rx) = unbounded::<()>();
     drop(tx);
