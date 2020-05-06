@@ -314,23 +314,18 @@ struct Shared<T> {
     disconnected: AtomicBool,
     sender_count: AtomicUsize,
     receiver_count: AtomicUsize,
+    sig_depot: Depot<Arc<Signal<Option<T>>>>,
 }
 
 impl<T> Shared<T> {
     fn new(cap: Option<usize>) -> Self {
         Self {
             chan: match cap {
-                // Some(0) =>  Channel::Rendezvous {
-                //     send_signal: Signal::default(),
-                //     done_signal: Signal::default(),
-                //     recv_signal: Signal::default(),
-                //     inner: spin::Mutex::default(),
-                // },
                 Some(cap) =>  Channel::Bounded {
                     cap,
                     pending: spin::Mutex::new(BoundedQueues {
                         senders: VecDeque::new(),
-                        queue: VecDeque::new(),
+                        queue: VecDeque::with_capacity(cap),
                         receivers: VecDeque::new(),
                     }),
                 },
@@ -342,6 +337,7 @@ impl<T> Shared<T> {
             disconnected: AtomicBool::new(false),
             sender_count: AtomicUsize::new(1),
             receiver_count: AtomicUsize::new(1),
+            sig_depot: Depot::default(),
         }
     }
 
@@ -350,12 +346,6 @@ impl<T> Shared<T> {
     fn disconnect_all(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
         match &self.chan {
-            // Channel::Rendezvous { send_signal, done_signal, recv_signal, inner } => {
-            //     let _ = inner.lock();
-            //     send_signal.notify_all(());
-            //     done_signal.notify_all(());
-            //     recv_signal.notify_all(());
-            // },
             Channel::Bounded { pending, .. } => {
                 let pending = pending.lock();
                 pending.senders.iter().for_each(|s| s.notify_all(()));
@@ -372,50 +362,14 @@ impl<T> Shared<T> {
 /// A transmitting end of a channel.
 pub struct Sender<T> {
     shared: Arc<Shared<T>>,
-    sig: Depot<Arc<Signal<Option<T>>>>,
 }
 
 impl<T> Sender<T> {
     #[inline(always)]
     fn send_inner(&self, msg: T, block: Option<Option<Instant>>) -> Result<(), TrySendTimeoutError<T>> {
         match &self.shared.chan {
-            // Channel::Rendezvous { send_signal, done_signal, recv_signal, inner: inner_lock } => loop {
-            //     let mut inner = wait_lock(&inner_lock);
-            //     if self.shared.disconnected.load(Ordering::Relaxed) {
-            //         return Err(TrySendError::Disconnected(msg));
-            //     }
-
-            //     if inner.1.is_none() {
-            //         inner.0 += 1;
-            //         inner.1 = Some(msg);
-            //         let this_id = inner.0;
-
-            //         recv_signal.notify_one(());
-            //         loop {
-            //             done_signal.wait(inner);
-            //             inner = wait_lock(&inner_lock);
-            //             if self.shared.disconnected.load(Ordering::Relaxed) {
-            //                 return if let Some(msg) = inner.1.take() {
-            //                     Err(TrySendError::Disconnected(msg))
-            //                 } else {
-            //                     Ok(())
-            //                 };
-            //             } else if inner.0 == this_id && inner.1.is_some() {
-            //                 // Spurious wakeup
-            //             } else {
-            //                 return Ok(());
-            //             }
-            //         }
-            //     }
-
-            //     if block {
-            //         recv_signal.wait(inner);
-            //     } else {
-            //         return Err(TrySendError::Full(msg));
-            //     }
-            // },
-            Channel::Bounded { cap, pending } => {
-                let mut pending = wait_lock(&pending);
+            Channel::Bounded { cap, pending: pending_lock } => {
+                let mut pending = wait_lock(&pending_lock);
                 if self.shared.disconnected.load(Ordering::Relaxed) {
                     return Err(TrySendTimeoutError::Disconnected(msg));
                 } else if let Some(recv) = pending.receivers.pop_front() {
@@ -426,7 +380,7 @@ impl<T> Sender<T> {
                     pending.queue.push_back(msg);
                     Ok(())
                 } else if let Some(deadline) = block {
-                    self.sig.with_one(
+                    self.shared.sig_depot.with_one(
                         || Arc::new(Signal::default()),
                         move |sig| {
                             *sig.lock() = Some(msg);
@@ -442,6 +396,9 @@ impl<T> Sender<T> {
 
                                 if let Some(msg) = sig.lock().take() {
                                     if timeout.timed_out() {
+                                        // Remove our signal
+                                        wait_lock(&pending_lock).senders.retain(|slot| !Arc::ptr_eq(slot, sig));
+
                                         Err(TrySendTimeoutError::Disconnected(msg))
                                     } else {
                                         Err(TrySendTimeoutError::Timeout(msg))
@@ -523,10 +480,7 @@ impl<T> Clone for Sender<T> {
     /// contents will only be cleaned up when all senders and the receiver have been dropped.
     fn clone(&self) -> Self {
         self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
-        Self {
-            shared: self.shared.clone(),
-            sig: Depot::default(),
-        }
+        Self { shared: self.shared.clone() }
     }
 }
 
@@ -548,7 +502,6 @@ impl<T> Drop for Sender<T> {
 /// The receiving end of a channel.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
-    sig: Depot<Arc<Signal<Option<T>>>>,
 }
 
 fn pull_pending<T>(
@@ -572,35 +525,6 @@ impl<T> Receiver<T> {
     #[inline(always)]
     fn recv_inner(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
         match &self.shared.chan {
-            // Channel::Rendezvous { send_signal, done_signal, recv_signal, inner: inner_lock } => loop {
-            //     let mut inner = wait_lock(&inner_lock);
-            //     if self.shared.disconnected.load(Ordering::Relaxed) {
-            //         return Err(TryRecvTimeoutError::Disconnected);
-            //     }
-
-            //     if let Some(msg) = inner.1.take() {
-            //         done_signal.notify_one(());
-            //         send_signal.notify_one(inner);
-            //         return Ok(msg);
-            //     }
-
-            //     if let Some(deadline) = block {
-            //         if let Some(deadline) = deadline {
-            //             let now = Instant::now();
-            //             if send_signal.wait_timeout_while(
-            //                 inner,
-            //                 deadline.duration_since(now),
-            //                 |_| !self.shared.disconnected.load(Ordering::Relaxed),
-            //             ).timed_out() {
-            //                 return Err(TryRecvTimeoutError::Timeout);
-            //             }
-            //         } else {
-            //             send_signal.wait(inner);
-            //         }
-            //     } else {
-            //         return Err(TryRecvTimeoutError::Empty);
-            //     }
-            // },
             Channel::Bounded { cap, pending: pending_lock } => {
                 let mut pending = wait_lock(&pending_lock);
                 pull_pending(*cap + 1, &mut pending);
@@ -609,7 +533,7 @@ impl<T> Receiver<T> {
                 } else if self.shared.disconnected.load(Ordering::Relaxed) {
                     return Err(TryRecvTimeoutError::Disconnected);
                 } else if let Some(deadline) = block {
-                    self.sig.with_one(
+                    self.shared.sig_depot.with_one(
                         || Arc::new(Signal::default()),
                         move |sig| {
                             pending.receivers.push_back(sig.clone());
@@ -766,10 +690,7 @@ impl<T> Clone for Receiver<T> {
     /// dropped.
     fn clone(&self) -> Self {
         self.shared.receiver_count.fetch_add(1, Ordering::Relaxed);
-        Self {
-            shared: self.shared.clone(),
-            sig: Depot::default(),
-        }
+        Self { shared: self.shared.clone() }
     }
 }
 
@@ -878,14 +799,8 @@ impl<T> Iterator for IntoIter<T> {
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(None));
     (
-        Sender {
-            shared: shared.clone(),
-            sig: Depot::default(),
-        },
-        Receiver {
-            shared,
-            sig: Depot::default(),
-        },
+        Sender { shared: shared.clone() },
+        Receiver { shared },
     )
 }
 
@@ -917,13 +832,7 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(Some(cap)));
     (
-        Sender {
-            shared: shared.clone(),
-            sig: Depot::default(),
-        },
-        Receiver {
-            shared,
-            sig: Depot::default(),
-        },
+        Sender { shared: shared.clone() },
+        Receiver { shared },
     )
 }

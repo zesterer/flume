@@ -41,7 +41,7 @@ To use Flume, place the following line under the `[dependencies]` section in you
 flume = "x.y"
 ```
 
-## Benchmarks
+## [Benchmarks](https://what-if.xkcd.com/147/)
 
 Although Flume has its own extensive benchmarks, don't take it from here that Flume is quick.
 The following graph is from the `crossbeam-channel` benchmark suite.
