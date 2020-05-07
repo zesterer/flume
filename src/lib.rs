@@ -155,7 +155,7 @@ pub enum TryRecvTimeoutError {
 
 #[derive(Default)]
 pub struct Depot<T> {
-    inner: spin::Mutex<Vec<T>>,
+    inner: InnerMutex<Vec<T>>,
 }
 
 const MAX_DEPOT_ITEMS: usize = 8;
@@ -277,6 +277,12 @@ fn wait_lock<'a, T>(lock: &'a InnerMutex<T>) -> InnerMutexGuard<'a, T> {
 }
 
 #[inline]
+#[cfg(windows)]
+fn wait_lock<'a, T>(lock: &'a InnerMutex<T>) -> InnerMutexGuard<'a, T> {
+    wait_mutex(lock)
+}
+
+#[inline]
 #[cfg(feature = "async")]
 fn poll_lock<'a, T>(lock: &'a InnerMutex<T>) -> Option<InnerMutexGuard<'a, T>> {
     lock.try_lock()
@@ -293,19 +299,13 @@ struct BoundedQueues<T> {
 }
 
 enum Channel<T> {
-    // Rendezvous {
-    //     send_signal: Signal<()>,
-    //     done_signal: Signal<()>,
-    //     recv_signal: Signal<()>,
-    //     inner: spin::Mutex<(u64, Option<T>)>,
-    // },
     Bounded {
         cap: usize,
-        pending: spin::Mutex<BoundedQueues<T>>,
+        pending: InnerMutex<BoundedQueues<T>>,
     },
     Unbounded {
         send_signal: Signal<()>,
-        queue: spin::Mutex<VecDeque<T>>,
+        queue: InnerMutex<VecDeque<T>>,
     },
 }
 
@@ -323,14 +323,14 @@ impl<T> Shared<T> {
             chan: match cap {
                 Some(cap) =>  Channel::Bounded {
                     cap,
-                    pending: spin::Mutex::new(BoundedQueues {
+                    pending: InnerMutex::new(BoundedQueues {
                         senders: VecDeque::new(),
                         queue: VecDeque::with_capacity(cap),
                         receivers: VecDeque::new(),
                     }),
                 },
                 None => Channel::Unbounded {
-                    queue: spin::Mutex::new(VecDeque::new()),
+                    queue: InnerMutex::new(VecDeque::new()),
                     send_signal: Signal::default(),
                 },
             },
@@ -347,12 +347,12 @@ impl<T> Shared<T> {
         self.disconnected.store(true, Ordering::Relaxed);
         match &self.chan {
             Channel::Bounded { pending, .. } => {
-                let pending = pending.lock();
+                let pending = wait_lock(&pending);
                 pending.senders.iter().for_each(|s| s.notify_all(()));
                 pending.receivers.iter().for_each(|s| s.notify_all(()));
             },
             Channel::Unbounded { queue, send_signal } => {
-                let queue = queue.lock();
+                let queue = wait_lock(&queue);
                 send_signal.notify_all(queue);
             },
         }
