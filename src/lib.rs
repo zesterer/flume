@@ -24,7 +24,7 @@ pub use select::Selector;
 
 use std::{
     collections::VecDeque,
-    sync::{self, Arc, Condvar, Mutex, MutexGuard, WaitTimeoutResult, atomic::{AtomicUsize, AtomicBool, Ordering}},
+    sync::{self, Arc, Condvar, Mutex, MutexGuard, WaitTimeoutResult, atomic::{AtomicUsize, AtomicBool, Ordering, spin_loop_hint}},
     time::{Duration, Instant},
     marker::PhantomData,
     thread,
@@ -249,14 +249,14 @@ impl<T> Signal<T> {
 fn wait_mutex<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
     let mut i = 0;
     loop {
-        for _ in 0..5 {
+        for _ in 0..6 {
             if let Ok(guard) = lock.try_lock() {
                 return guard;
             }
             thread::yield_now();
         }
-        thread::sleep(Duration::from_nanos(i * 50));
         i += 1;
+        thread::sleep(Duration::from_nanos(i * 50));
     }
 }
 
@@ -279,7 +279,7 @@ fn wait_lock<'a, T>(lock: &'a InnerMutex<T>) -> InnerMutexGuard<'a, T> {
 #[inline]
 #[cfg(windows)]
 fn wait_lock<'a, T>(lock: &'a InnerMutex<T>) -> InnerMutexGuard<'a, T> {
-    wait_mutex(lock)
+    lock.lock().unwrap()
 }
 
 #[inline]
@@ -357,6 +357,34 @@ impl<T> Shared<T> {
             },
         }
     }
+
+    fn is_empty_inner(&self) -> bool {
+        self.len_inner() == 0
+    }
+
+    fn is_full_inner(&self) -> bool {
+        self.capacity_inner().map(|cap| cap == self.len_inner()).unwrap_or(false)
+    }
+
+    fn len_inner(&self) -> usize {
+        match &self.chan {
+            Channel::Bounded { pending, cap } => {
+                let mut pending = wait_lock(&pending);
+                pull_pending(*cap, &mut pending);
+                pending.queue.len()
+            },
+            Channel::Unbounded { queue, .. } => {
+                wait_lock(&queue).len()
+            },
+        }
+    }
+
+    fn capacity_inner(&self) -> Option<usize> {
+        match &self.chan {
+            Channel::Bounded { cap, .. } => Some(*cap),
+            Channel::Unbounded { .. } => None,
+        }
+    }
 }
 
 /// A transmitting end of a channel.
@@ -399,9 +427,9 @@ impl<T> Sender<T> {
                                         // Remove our signal
                                         wait_lock(&pending_lock).senders.retain(|slot| !Arc::ptr_eq(slot, sig));
 
-                                        Err(TrySendTimeoutError::Disconnected(msg))
-                                    } else {
                                         Err(TrySendTimeoutError::Timeout(msg))
+                                    } else {
+                                        Err(TrySendTimeoutError::Disconnected(msg))
                                     }
                                 } else {
                                     Ok(())
@@ -472,6 +500,28 @@ impl<T> Sender<T> {
     /// will block.
     pub fn send_timeout(&self, msg: T, dur: Duration) -> Result<(), SendTimeoutError<T>> {
         self.send_deadline(msg, Instant::now().checked_add(dur).unwrap())
+    }
+
+    /// Returns true if the channel is empty.
+    /// Note: Zero-capacity channels are always empty.
+    pub fn is_empty(&self) -> bool {
+        self.shared.is_empty_inner()
+    }
+
+    /// Returns true if the channel is full.
+    /// Note: Zero-capacity channels are always full.
+    pub fn is_full(&self) -> bool {
+        self.shared.is_full_inner()
+    }
+
+    /// Returns the number of messages in the channel
+    pub fn len(&self) -> usize {
+        self.shared.len_inner()
+    }
+
+    /// If the channel is bounded, returns its capacity.
+    pub fn capacity(&self) -> Option<usize> {
+        self.shared.capacity_inner()
     }
 }
 
@@ -631,7 +681,7 @@ impl<T> Receiver<T> {
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
         self.recv_inner(Some(Some(deadline))).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
-            TryRecvTimeoutError::Timeout => RecvTimeoutError::Disconnected,
+            TryRecvTimeoutError::Timeout => RecvTimeoutError::Timeout,
             _ => unreachable!(),
         })
     }
@@ -682,6 +732,28 @@ impl<T> Receiver<T> {
 
         Drain { queue, _phantom: PhantomData }
     }
+
+    /// Returns true if the channel is empty.
+    /// Note: Zero-capacity channels are always empty.
+    pub fn is_empty(&self) -> bool {
+        self.shared.is_empty_inner()
+    }
+
+    /// Returns true if the channel is full.
+    /// Note: Zero-capacity channels are always full.
+    pub fn is_full(&self) -> bool {
+        self.shared.is_full_inner()
+    }
+
+    /// Returns the number of messages in the channel.
+    pub fn len(&self) -> usize {
+        self.shared.len_inner()
+    }
+
+    /// If the channel is bounded, returns its capacity.
+    pub fn capacity(&self) -> Option<usize> {
+        self.shared.capacity_inner()
+    }
 }
 
 impl<T> Clone for Receiver<T> {
@@ -707,6 +779,15 @@ impl<T> Drop for Receiver<T> {
         if self.shared.receiver_count.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.shared.disconnect_all();
         }
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Receiver<T> {
+    type Item = T;
+    type IntoIter = Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Iter { receiver: self }
     }
 }
 

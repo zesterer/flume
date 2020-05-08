@@ -269,20 +269,20 @@ fn test_robin_b<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize) {
 fn test_mpsc_bounded_no_wait<S: Sender>(b: &mut Bencher, thread_num: u64) {
     b.iter_custom(|iters| {
         let iters = iters * 1000;
-        let (mut tx, mut rx) = S::bounded(iters as usize);
+        let (tx, rx) = S::bounded(iters as usize);
         let start = Instant::now();
 
         crossbeam_utils::thread::scope(|scope| {
             for _ in 0..thread_num {
                 let tx = tx.clone();
                 scope.spawn(move |_| {
-                    for i in 0..iters / thread_num {
+                    for _ in 0..iters / thread_num {
                         tx.send(Default::default());
                     }
                 });
             }
 
-            for i in 0..iters - ((iters / thread_num) * thread_num) {
+            for _ in 0..iters - ((iters / thread_num) * thread_num) {
                 tx.send(Default::default());
             }
 
@@ -298,7 +298,7 @@ fn test_mpsc_bounded_no_wait<S: Sender>(b: &mut Bencher, thread_num: u64) {
 
 fn test_mpsc_bounded<S: Sender>(b: &mut Bencher, bound: usize, thread_num: usize) {
     b.iter_custom(|iters| {
-        let (mut tx, mut rx) = S::bounded(bound);
+        let (tx, rx) = S::bounded(bound);
         let start = Instant::now();
 
         crossbeam_utils::thread::scope(|scope| {
@@ -451,24 +451,24 @@ fn mpsc_bounded_4t(b: &mut Criterion) {
 
 criterion_group!(
     compare,
-    // create,
-    // oneshot,
-    // inout,
-    mpsc_bounded_no_wait_4t,
-    mpsc_bounded_4t,
-    // hydra_32t_1m,
-    // hydra_32t_1000m,
-    // hydra_256t_1m,
-    // hydra_1t_1000m,
-    // hydra_4t_10000m,
-    // kitsune_32t_1m,
-    // kitsune_32t_1000m,
-    // kitsune_256t_1m,
-    // kitsune_1t_1000m,
-    // kitsune_4t_10000m,
-    // robin_u_32t_1m,
-    // robin_u_4t_1000m,
+    create,
+    oneshot,
+    inout,
+    hydra_32t_1m,
+    hydra_32t_1000m,
+    hydra_256t_1m,
+    hydra_1t_1000m,
+    hydra_4t_10000m,
     robin_b_32t_16m,
     robin_b_4t_1000m,
+    robin_u_32t_1m,
+    robin_u_4t_1000m,
+    mpsc_bounded_no_wait_4t,
+    mpsc_bounded_4t,
+    kitsune_32t_1m,
+    kitsune_32t_1000m,
+    kitsune_256t_1m,
+    kitsune_1t_1000m,
+    kitsune_4t_10000m,
 );
 criterion_main!(compare);
