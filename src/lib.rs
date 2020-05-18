@@ -18,23 +18,81 @@ pub mod select;
 #[cfg(feature = "async")]
 pub mod r#async;
 
+#[cfg(not(feature = "loom"))]
+mod loom {
+    pub use std::sync;
+    pub use std::thread;
+    pub use std::cell;
+}
+
+#[cfg(not(feature = "loom"))]
+mod inner_mutex {
+    #[cfg(windows)]
+    pub use std::sync::{Mutex as InnerMutex, MutexGuard};
+
+    #[cfg(not(windows))]
+    pub use spin::{Mutex as InnerMutex, MutexGuard};
+}
+
+#[cfg(feature = "loom")]
+mod inner_mutex {
+    #[cfg(windows)]
+    pub use loom::sync::Mutex as InnerMutex;
+
+    pub use loom::sync::MutexGuard;
+
+    #[cfg(not(windows))]
+    pub struct InnerMutex<T>(loom::sync::Mutex<T>);
+
+    #[cfg(not(windows))]
+    impl<T> InnerMutex<T> {
+        #[inline]
+        pub fn new(t: T) -> InnerMutex<T> {
+            InnerMutex(loom::sync::Mutex::new(t))
+        }
+
+        #[inline]
+        pub fn lock(&self) -> MutexGuard<'_, T> {
+            self.0.lock().unwrap()
+        }
+
+        #[inline]
+        pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+            self.0.try_lock().ok()
+        }
+    }
+}
+
 // Reexports
 #[cfg(feature = "select")]
 pub use select::Selector;
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Condvar, Mutex, WaitTimeoutResult, atomic::{AtomicUsize, Ordering}},
     time::{Duration, Instant},
-    cell::{UnsafeCell, RefCell},
+    cell::RefCell,
     marker::PhantomData,
-    thread,
     fmt,
 };
-#[cfg(windows)]
-use std::sync::{Mutex as InnerMutex, MutexGuard};
-#[cfg(not(windows))]
-use spin::{Mutex as InnerMutex, MutexGuard};
+
+use inner_mutex::{InnerMutex, MutexGuard};
+use loom::sync::{Arc, Condvar, Mutex, WaitTimeoutResult, atomic::{AtomicUsize, Ordering}};
+use loom::cell::UnsafeCell;
+use loom::thread;
+
+pub fn wait_while<'a, T, F>(
+    condvar: &loom::sync::Condvar,
+    mut guard: loom::sync::MutexGuard<'a, T>,
+    mut condition: F,
+) -> loom::sync::LockResult<loom::sync::MutexGuard<'a, T>>
+where
+    F: FnMut(&mut T) -> bool,
+{
+    while condition(&mut *guard) {
+        guard = condvar.wait(guard)?;
+    }
+    Ok(guard)
+}
 
 #[cfg(feature = "async")]
 use std::task::Waker;
@@ -125,11 +183,20 @@ impl fmt::Display for RecvTimeoutError {
 
 impl std::error::Error for RecvTimeoutError {}
 
-#[derive(Default)]
 struct Signal<T = ()> {
     lock: Mutex<T>,
     trigger: Condvar,
     waiters: AtomicUsize,
+}
+
+impl<T: Default> Default for Signal<T> {
+    fn default() -> Signal<T> {
+        Signal {
+            lock: Mutex::new(T::default()),
+            trigger: Condvar::new(),
+            waiters: AtomicUsize::new(0)
+        }
+    }
 }
 
 impl<T> Signal<T> {
@@ -146,7 +213,7 @@ impl<T> Signal<T> {
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
         first(&mut *guard);
-        let _guard = self.trigger.wait_while(guard, cond).unwrap();
+        let _guard = wait_while(&self.trigger, guard, cond).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
     }
 
@@ -312,7 +379,7 @@ impl<T> Shared<T> {
                 }
                 thread::yield_now();
             }
-            thread::sleep(Duration::from_nanos(i * 50));
+            std::thread::sleep(Duration::from_nanos(i * 50));
             i += 1;
         }
     }

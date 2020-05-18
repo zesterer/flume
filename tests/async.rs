@@ -1,5 +1,6 @@
 use flume::*;
 
+#[cfg(not(feature = "loom"))]
 #[cfg(feature = "async")]
 #[test]
 fn r#async() {
@@ -17,6 +18,7 @@ fn r#async() {
     t.join().unwrap();
 }
 
+#[cfg(not(feature = "loom"))]
 #[cfg(feature = "async")]
 #[async_std::test]
 async fn send_100_million_no_drop_or_reorder() {
