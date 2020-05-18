@@ -59,6 +59,7 @@ fn iter_threaded() {
     });
 }
 
+#[cfg(not(feature = "loom"))]
 #[test]
 fn recv_timeout() {
     model(|| {
@@ -79,6 +80,7 @@ fn recv_timeout() {
     });
 }
 
+#[cfg(not(feature = "loom"))]
 #[test]
 fn recv_deadline() {
     model(|| {
@@ -208,7 +210,7 @@ fn rendezvous() {
     model(|| {
         let (tx, rx) = bounded(0);
 
-        for i in 0..3 {
+        for i in 0..20 {
             let tx = tx.clone();
             let t = loom::thread::spawn(move || {
                 assert!(tx.try_send(()).is_err());
