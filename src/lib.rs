@@ -660,6 +660,12 @@ impl<T> Drop for Sender<T> {
     }
 }
 
+impl<T> fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Sender").finish()
+    }
+}
+
 /// The receiving end of a channel.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
@@ -756,6 +762,12 @@ impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.shared.wait_inner().listen_mode = 0;
         self.shared.receiver_disconnected();
+    }
+}
+
+impl<T> fmt::Debug for Receiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Receiver").finish()
     }
 }
 
