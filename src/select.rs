@@ -125,7 +125,7 @@ impl<'a, T> Selector<'a, T> {
             if let Some(val) = (&mut self.selections[self.next_poll].0)() {
                 return Some(val);
             }
-            self.next_poll = (((self.next_poll as u64 + 1) * self.selections.len() as u64) >> 32) as usize;
+            self.next_poll = (self.next_poll + 1) % self.selections.len();
         }
         None
     }
