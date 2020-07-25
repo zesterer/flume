@@ -193,21 +193,16 @@ impl<T> Signal<T> {
         self.waiters.fetch_sub(1, Ordering::Relaxed);
     }
 
-    fn wait_timeout<G>(&self, sync_guard: G, dur: Duration) -> WaitTimeoutResult {
-        let guard = self.lock.lock().unwrap();
-        self.waiters.fetch_add(1, Ordering::Relaxed);
-        drop(sync_guard);
-        let (_guard, timeout) = self.trigger.wait_timeout(guard, dur).unwrap();
-        self.waiters.fetch_sub(1, Ordering::Relaxed);
-        timeout
-    }
-
     fn wait_while<G>(&self, sync_guard: G, cond: impl FnMut(&mut T) -> bool) {
         let guard = self.lock.lock().unwrap();
         self.waiters.fetch_add(1, Ordering::Relaxed);
         drop(sync_guard);
         let _guard = self.trigger.wait_while(guard, cond).unwrap();
         self.waiters.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn wait_timeout<G>(&self, sync_guard: G, dur: Duration) -> WaitTimeoutResult {
+        self.wait_timeout_while(sync_guard, dur, |_| true)
     }
 
     fn wait_timeout_while<G>(&self, sync_guard: G, dur: Duration, cond: impl FnMut(&mut T) -> bool) -> WaitTimeoutResult {
@@ -220,11 +215,7 @@ impl<T> Signal<T> {
     }
 
     fn notify_one<G>(&self, sync_guard: G) {
-        if self.waiters.load(Ordering::Relaxed) > 0 {
-            drop(sync_guard);
-            let _guard = self.lock.lock().unwrap();
-            self.trigger.notify_one();
-        }
+        self.notify_one_with(sync_guard, |_| ());
     }
 
     fn notify_one_with<G>(&self, sync_guard: G, f: impl FnOnce(&mut T)) {
@@ -418,7 +409,7 @@ impl<T> Sender<T> {
                                 let now = Instant::now();
                                 let timeout = sig.wait_timeout_while(
                                     pending,
-                                    deadline.duration_since(now),
+                                    deadline.saturating_duration_since(now),
                                     |msg| msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed),
                                 );
 
@@ -592,7 +583,7 @@ impl<T> Receiver<T> {
                                 let now = Instant::now();
                                 if sig.wait_timeout_while(
                                     pending,
-                                    deadline.duration_since(now),
+                                    deadline.saturating_duration_since(now),
                                     |msg| msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed),
                                 ).timed_out() {
                                     // There is a problem here. When calling `rx.recv()`, a signal
@@ -641,7 +632,7 @@ impl<T> Receiver<T> {
                     if let Some(deadline) = deadline {
                         let now = Instant::now();
                         if send_signal
-                            .wait_timeout(queue, deadline.duration_since(now))
+                            .wait_timeout(queue, deadline.saturating_duration_since(now))
                             .timed_out()
                         {
                             break Err(TryRecvTimeoutError::Timeout);
