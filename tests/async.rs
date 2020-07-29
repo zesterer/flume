@@ -36,6 +36,40 @@ fn r#async_send() {
 }
 
 #[cfg(feature = "async")]
+#[test]
+fn r#async_recv_disconnect() {
+    let (tx, mut rx) = bounded::<i32>(0);
+
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        drop(tx)
+    });
+
+    async_std::task::block_on(async {
+        assert_eq!(rx.recv_async().await, Err(RecvError::Disconnected));
+    });
+
+    t.join().unwrap();
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn r#async_send_disconnect() {
+    let (tx, mut rx) = bounded(0);
+
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        drop(rx)
+    });
+
+    async_std::task::block_on(async {
+        assert_eq!(tx.send_async(42u32).await, Err(SendError(42)));
+    });
+
+    t.join().unwrap();
+}
+
+#[cfg(feature = "async")]
 #[async_std::test]
 async fn send_100_million_no_drop_or_reorder() {
     #[derive(Debug)]

@@ -325,7 +325,7 @@ impl<T> Shared<T> {
     ) -> R {
         let mut chan = wait_lock(&self.chan);
 
-        if self.disconnected.load(Ordering::SeqCst) {
+        if self.is_disconnected() {
             Err(TrySendTimeoutError::Disconnected(item)).into()
         } else if let Some(r) = chan.waiting.pop_front() {
             debug_assert!(chan.queue.len() == 0);
@@ -366,7 +366,7 @@ impl<T> Shared<T> {
                             wait_lock(&self.chan).sending.as_mut().unwrap().1.retain(|s| !Arc::ptr_eq(s, &slot));
                         }
                         let item = slot.0.lock().take();
-                        item.map(|item| if self.disconnected.load(Ordering::Relaxed) {
+                        item.map(|item| if self.is_disconnected() {
                             Err(TrySendTimeoutError::Disconnected(item))
                         } else {
                             Err(TrySendTimeoutError::Timeout(item))
@@ -396,7 +396,7 @@ impl<T> Shared<T> {
 
         if let Some(item) = chan.queue.pop_front() {
             Ok(item).into()
-        } else if self.disconnected.load(Ordering::SeqCst) {
+        } else if self.is_disconnected() {
             Err(TryRecvTimeoutError::Disconnected).into()
         } else if should_block {
             let slot = Slot::new(None, make_signal());
@@ -424,7 +424,7 @@ impl<T> Shared<T> {
                             wait_lock(&self.chan).waiting.retain(|s| !Arc::ptr_eq(s, &slot));
                         }
                         let item = slot.0.lock().take();
-                        item.ok_or_else(|| if self.disconnected.load(Ordering::Relaxed) {
+                        item.ok_or_else(|| if self.is_disconnected() {
                             TryRecvTimeoutError::Disconnected
                         } else {
                             TryRecvTimeoutError::Timeout
@@ -446,6 +446,10 @@ impl<T> Shared<T> {
         chan.pull_pending(false);
         chan.sending.as_ref().map(|(_, sending)| sending.iter().for_each(|slot| slot.signal().fire()));
         chan.waiting.iter().for_each(|slot| slot.signal().fire());
+    }
+
+    fn is_disconnected(&self) -> bool {
+        self.disconnected.load(Ordering::SeqCst)
     }
 
     fn is_empty(&self) -> bool {

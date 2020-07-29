@@ -41,6 +41,7 @@ impl<T: Unpin> Sender<T> {
 
 struct SendFut<'a, T: Unpin> {
     shared: &'a Shared<T>,
+    // Only none after dropping
     slot: Option<Result<Arc<Slot<T, AsyncSignal>>, T>>,
 }
 
@@ -60,6 +61,14 @@ impl<'a, T: Unpin> Future for SendFut<'a, T> {
         if let Some(Ok(slot)) = self.slot.as_ref() {
             return if slot.is_empty() {
                 Poll::Ready(Ok(()))
+            } else if self.shared.is_disconnected() {
+                match self.slot.take().unwrap() {
+                    Err(item) => Poll::Ready(Err(SendError(item))),
+                    Ok(slot) => match slot.try_take() {
+                        Some(item) => Poll::Ready(Err(SendError(item))),
+                        None => Poll::Ready(Ok(())),
+                    },
+                }
             } else {
                 Poll::Pending
             };
@@ -90,7 +99,7 @@ impl<'a, T: Unpin> Future for SendFut<'a, T> {
 
 impl<'a, T: Unpin> FusedFuture for SendFut<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.shared.disconnected.load(Ordering::SeqCst)
+        self.shared.is_disconnected()
     }
 }
 
@@ -160,10 +169,14 @@ impl<'a, T> Future for RecvFut<'a, T> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Some(slot) = self.slot.as_ref() {
-            return match slot.try_take() {
+            match slot.try_take() {
                 Some(item) => Poll::Ready(Ok(item)),
-                None => Poll::Pending,
-            };
+                None => if self.shared.is_disconnected() {
+                    Poll::Ready(Err(RecvError::Disconnected))
+                } else {
+                    Poll::Pending
+                },
+            }
         } else {
             self.shared.recv(
                 // should_block
@@ -186,7 +199,7 @@ impl<'a, T> Future for RecvFut<'a, T> {
 
 impl<'a, T> FusedFuture for RecvFut<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.shared.disconnected.load(Ordering::SeqCst)
+        self.shared.is_disconnected()
     }
 }
 
@@ -207,6 +220,6 @@ impl<'a, T> Stream for RecvFut<'a, T> {
 
 impl<'a, T> FusedStream for RecvFut<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.shared.disconnected.load(Ordering::SeqCst)
+        self.shared.is_disconnected()
     }
 }
