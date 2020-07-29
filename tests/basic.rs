@@ -46,7 +46,7 @@ fn send_timeout() {
     assert!(tx.send_timeout(43, dur).is_err());
     let now = Instant::now();
 
-    let max_error = Duration::from_millis(1);
+    let max_error = Duration::from_millis(25);
     assert!(now.duration_since(then) < dur.checked_add(max_error).unwrap());
     assert!(now.duration_since(then) > dur.checked_sub(max_error).unwrap());
 

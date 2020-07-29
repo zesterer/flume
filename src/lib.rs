@@ -18,6 +18,8 @@ pub mod select;
 #[cfg(feature = "async")]
 pub mod r#async;
 
+mod signal;
+
 // Reexports
 #[cfg(feature = "select")]
 pub use select::Selector;
@@ -30,10 +32,13 @@ use std::{
     thread,
     fmt,
 };
-#[cfg(windows)]
-use std::sync::{Mutex as InnerMutex, MutexGuard as InnerMutexGuard};
-#[cfg(not(windows))]
-use spin::{Mutex as InnerMutex, MutexGuard as InnerMutexGuard};
+
+// #[cfg(windows)]
+// use std::sync::{Mutex as InnerMutex, MutexGuard as InnerMutexGuard};
+// #[cfg(not(windows))]
+// use spin::{Mutex as InnerMutex, MutexGuard as InnerMutexGuard};
+
+use spinning_top::{Spinlock, SpinlockGuard};
 
 #[cfg(feature = "async")]
 use std::task::Waker;
@@ -153,107 +158,90 @@ pub enum TryRecvTimeoutError {
     Disconnected,
 }
 
-#[derive(Default)]
-pub struct Depot<T> {
-    inner: InnerMutex<Vec<T>>,
-}
+pub struct Slot<T, S: ?Sized>(Spinlock<Option<T>>, S);
 
-const MAX_DEPOT_ITEMS: usize = 8;
+impl<T, S: ?Sized + signal::Signal> Slot<T, S> {
+    pub fn new(item: Option<T>) -> Arc<Self> where S: Default {
+        Arc::new(Self(Spinlock::new(item), S::default()))
+    }
 
-impl<T> Depot<T> {
-    #[inline(always)]
-    pub fn with_one<R>(&self, make_fn: impl FnOnce() -> T, f: impl FnOnce(&mut T) -> R) -> R {
-        let mut item = wait_lock(&self.inner).pop().unwrap_or_else(make_fn);
-        let ret = f(&mut item);
-        let mut inner = wait_lock(&self.inner);
-        if inner.len() < MAX_DEPOT_ITEMS {
-            inner.push(item);
-        }
-        ret
+    pub fn signal(&self) -> &S {
+        &self.1
+    }
+
+    pub fn fire_recv(&self) -> T {
+        let item = self.0.lock().take().unwrap();
+        self.1.fire();
+        item
+    }
+
+    pub fn fire_send(&self, item: T) {
+        *self.0.lock() = Some(item);
+        self.1.fire();
     }
 }
 
-#[derive(Default)]
-struct Signal<T = ()> {
-    lock: Mutex<T>,
-    trigger: Condvar,
-    waiters: AtomicUsize,
-}
-
-impl<T> Signal<T> {
-    fn lock(&self) -> sync::MutexGuard<T> {
-        wait_mutex(&self.lock)
-    }
-
-    fn wait<G>(&self, sync_guard: G) {
-        let guard = self.lock.lock().unwrap();
-        self.waiters.fetch_add(1, Ordering::Relaxed);
-        drop(sync_guard);
-        let _guard = self.trigger.wait(guard).unwrap();
-        self.waiters.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    fn wait_while<G>(&self, sync_guard: G, cond: impl FnMut(&mut T) -> bool) {
-        let guard = self.lock.lock().unwrap();
-        self.waiters.fetch_add(1, Ordering::Relaxed);
-        drop(sync_guard);
-        let _guard = self.trigger.wait_while(guard, cond).unwrap();
-        self.waiters.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    fn wait_timeout<G>(&self, sync_guard: G, dur: Duration) -> WaitTimeoutResult {
-        self.wait_timeout_while(sync_guard, dur, |_| true)
-    }
-
-    fn wait_timeout_while<G>(&self, sync_guard: G, dur: Duration, cond: impl FnMut(&mut T) -> bool) -> WaitTimeoutResult {
-        let guard = self.lock.lock().unwrap();
-        self.waiters.fetch_add(1, Ordering::Relaxed);
-        drop(sync_guard);
-        let (_guard, timeout) = self.trigger.wait_timeout_while(guard, dur, cond).unwrap();
-        self.waiters.fetch_sub(1, Ordering::Relaxed);
-        timeout
-    }
-
-    fn notify_one<G>(&self, sync_guard: G) {
-        self.notify_one_with(sync_guard, |_| ());
-    }
-
-    fn notify_one_with<G>(&self, sync_guard: G, f: impl FnOnce(&mut T)) {
-        if self.waiters.load(Ordering::Relaxed) > 0 {
-            drop(sync_guard);
-            let mut guard = self.lock.lock().unwrap();
-            f(&mut *guard);
-            self.trigger.notify_one();
-        }
-    }
-
-    fn notify_all<G>(&self, sync_guard: G) {
-        if self.waiters.load(Ordering::Relaxed) > 0 {
-            drop(sync_guard);
-            let _guard = self.lock.lock().unwrap();
-            self.trigger.notify_all();
-        }
-    }
-}
-
-#[inline]
-fn wait_mutex<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
-    let mut i = 0;
-    loop {
-        for _ in 0..6 {
-            if let Ok(guard) = lock.try_lock() {
-                return guard;
+impl<T> Slot<T, signal::SyncSignal> {
+    pub fn wait_recv(&self, abort: &AtomicBool) -> Option<T> {
+        loop {
+            let item = self.0.lock().take();
+            if let Some(item) = item {
+                break Some(item);
+            } else if abort.load(Ordering::SeqCst) {
+                break None;
+            } else {
+                self.1.wait()
             }
-            thread::yield_now();
         }
-        i += 1;
-        thread::sleep(Duration::from_nanos(i * 50));
+    }
+
+    // Err(true) if timeout
+    pub fn wait_deadline_recv(&self, abort: &AtomicBool, deadline: Instant) -> Result<T, bool> {
+        loop {
+            let item = self.0.lock().take();
+            if let Some(item) = item {
+                break Ok(item);
+            } else if abort.load(Ordering::SeqCst) {
+                break Err(false);
+            } else if let Some(dur) = deadline.checked_duration_since(Instant::now()) {
+                self.1.wait_timeout(dur);
+            } else {
+                break Err(true);
+            }
+        }
+    }
+
+    pub fn wait_send(&self, abort: &AtomicBool) {
+        loop {
+            if self.0.lock().is_none() {
+                break;
+            } else if abort.load(Ordering::SeqCst) {
+                break;
+            }
+
+            self.1.wait();
+        }
+    }
+
+    // Err(true) if timeout
+    pub fn wait_deadline_send(&self, abort: &AtomicBool, deadline: Instant) -> Result<(), bool> {
+        loop {
+            if self.0.lock().is_none() {
+                break Ok(());
+            } else if abort.load(Ordering::SeqCst) {
+                break Err(false);
+            } else if let Some(dur) = deadline.checked_duration_since(Instant::now()) {
+                self.1.wait_timeout(dur);
+            } else {
+                break Err(true);
+            }
+        }
     }
 }
 
 #[inline]
 #[cfg(not(windows))]
-fn wait_lock<'a, T>(lock: &'a InnerMutex<T>) -> InnerMutexGuard<'a, T> {
+fn wait_lock<'a, T>(lock: &'a Spinlock<T>) -> SpinlockGuard<'a, T> {
     let mut i = 0;
     loop {
         for _ in 0..5 {
@@ -267,68 +255,206 @@ fn wait_lock<'a, T>(lock: &'a InnerMutex<T>) -> InnerMutexGuard<'a, T> {
     }
 }
 
-#[inline]
-#[cfg(windows)]
-fn wait_lock<'a, T>(lock: &'a InnerMutex<T>) -> InnerMutexGuard<'a, T> {
-    lock.lock().unwrap()
-}
+// #[inline]
+// #[cfg(windows)]
+// fn wait_lock<'a, T>(lock: &'a InnerMutex<T>) -> InnerMutexGuard<'a, T> {
+//     lock.lock().unwrap()
+// }
 
-#[inline]
-#[cfg(feature = "async")]
-fn poll_lock<'a, T>(lock: &'a InnerMutex<T>) -> Option<InnerMutexGuard<'a, T>> {
-    lock.try_lock()
-}
-
-/// Invariants; While locked, one of the following will be true:
-/// - The queue will be full (i.e: contain example `cap` items)
-/// - the `senders` queue will be empty
-/// Additionally, a non-empty queue implies that `receivers` will be empty
-struct BoundedQueues<T> {
-    senders: VecDeque<Arc<Signal<Option<T>>>>,
+struct Bounded<T> {
+    sending: VecDeque<Arc<Slot<T, dyn signal::Signal + Send + Sync>>>,
     queue: VecDeque<T>,
-    receivers: VecDeque<Arc<Signal<Option<T>>>>,
+    waiting: VecDeque<Arc<Slot<T, dyn signal::Signal + Send + Sync>>>,
 }
 
-enum Channel<T> {
-    Bounded {
-        cap: usize,
-        pending: InnerMutex<BoundedQueues<T>>,
-    },
-    Unbounded {
-        send_signal: Signal<()>,
-        queue: InnerMutex<VecDeque<T>>,
-    },
+impl<T> Bounded<T> {
+    fn pull_pending(&mut self, effective_cap: usize) {
+        while self.queue.len() < effective_cap {
+            if let Some(s) = self.sending.pop_front() {
+                self.queue.push_back(s.fire_recv());
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+struct Unbounded<T> {
+    queue: VecDeque<T>,
+    waiting: VecDeque<Arc<Slot<T, dyn signal::Signal + Send + Sync>>>,
+}
+
+enum Chan<T> {
+    Bounded(usize, Spinlock<Bounded<T>>),
+    Unbounded(Spinlock<Unbounded<T>>),
+}
+
+enum Block {
+    None,
+    Until(Instant),
+    Forever,
 }
 
 struct Shared<T> {
-    chan: Channel<T>,
+    chan: Chan<T>,
     disconnected: AtomicBool,
     sender_count: AtomicUsize,
     receiver_count: AtomicUsize,
-    sig_depot: Depot<Arc<Signal<Option<T>>>>,
 }
 
 impl<T> Shared<T> {
     fn new(cap: Option<usize>) -> Self {
         Self {
             chan: match cap {
-                Some(cap) =>  Channel::Bounded {
-                    cap,
-                    pending: InnerMutex::new(BoundedQueues {
-                        senders: VecDeque::new(),
-                        queue: VecDeque::with_capacity(cap),
-                        receivers: VecDeque::new(),
-                    }),
-                },
-                None => Channel::Unbounded {
-                    queue: InnerMutex::new(VecDeque::new()),
-                    send_signal: Signal::default(),
-                },
+                Some(cap) => Chan::Bounded(cap, Spinlock::new(Bounded {
+                    sending: VecDeque::new(),
+                    queue: VecDeque::new(),
+                    waiting: VecDeque::new(),
+                })),
+                None => Chan::Unbounded(Spinlock::new(Unbounded {
+                    queue: VecDeque::new(),
+                    waiting: VecDeque::new(),
+                })),
             },
             disconnected: AtomicBool::new(false),
             sender_count: AtomicUsize::new(1),
             receiver_count: AtomicUsize::new(1),
-            sig_depot: Depot::default(),
+        }
+    }
+
+    fn send(&self, item: T, block: Option<Option<Instant>>) -> Result<(), TrySendTimeoutError<T>> {
+        match &self.chan {
+            Chan::Bounded(cap, inner) => {
+                let mut inner_guard = wait_lock(inner);
+
+                if self.disconnected.load(Ordering::SeqCst) {
+                    Err(TrySendTimeoutError::Disconnected(item))
+                } else if let Some(r) = inner_guard.waiting.pop_front() {
+                    debug_assert!(inner_guard.queue.len() == 0);
+                    r.fire_send(item);
+                    Ok(())
+                } else if inner_guard.queue.len() < *cap {
+                    inner_guard.queue.push_back(item);
+                    Ok(())
+                } else if let Some(deadline) = block {
+                    let slot = Slot::<_, signal::SyncSignal>::new(Some(item));
+                    inner_guard.sending.push_back(slot.clone());
+                    drop(inner_guard);
+
+                    if let Some(deadline) = deadline {
+                        slot.wait_deadline_send(&self.disconnected, deadline)
+                            .or_else(|timed_out| {
+                                if timed_out { // Remove our signal
+                                    let slot: Arc<Slot<T, dyn signal::Signal + Send + Sync>> = slot.clone();
+                                    wait_lock(inner).sending.retain(|s| !Arc::ptr_eq(s, &slot));
+                                }
+                                let item = slot.0.lock().take();
+                                item.map(|item| if self.disconnected.load(Ordering::Relaxed) {
+                                    Err(TrySendTimeoutError::Disconnected(item))
+                                } else {
+                                    Err(TrySendTimeoutError::Timeout(item))
+                                })
+                                .unwrap_or(Ok(()))
+                            })
+                    } else {
+                        slot.wait_send(&self.disconnected);
+
+                        let item = slot.0.lock().take();
+                        match item {
+                            Some(item) => Err(TrySendTimeoutError::Disconnected(item)),
+                            None => Ok(()),
+                        }
+                    }
+                } else {
+                    Err(TrySendTimeoutError::Full(item))
+                }
+            },
+            Chan::Unbounded(inner) => {
+                let mut inner = wait_lock(inner);
+                if self.disconnected.load(Ordering::SeqCst) {
+                    return Err(TrySendTimeoutError::Disconnected(item))
+                } else if let Some(r) = inner.waiting.pop_front() {
+                    drop(inner);
+                    r.fire_send(item);
+                } else {
+                    inner.queue.push_back(item);
+                }
+
+                Ok(())
+            },
+        }
+    }
+
+    fn recv(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
+        match &self.chan {
+            Chan::Bounded(cap, inner) => {
+                let mut inner_guard = wait_lock(inner);
+                inner_guard.pull_pending(*cap + 1); // Effective cap of cap + 1 because we're going to be popping one
+
+                if let Some(item) = inner_guard.queue.pop_front() {
+                    Ok(item)
+                } else if self.disconnected.load(Ordering::SeqCst) {
+                    Err(TryRecvTimeoutError::Disconnected)
+                } else if let Some(deadline) = block {
+                    let slot = Slot::<_, signal::SyncSignal>::new(None);
+                    inner_guard.waiting.push_back(slot.clone());
+                    drop(inner_guard);
+
+                    if let Some(deadline) = deadline {
+                        slot.wait_deadline_recv(&self.disconnected, deadline)
+                            .or_else(|timed_out| {
+                                if timed_out { // Remove our signal
+                                    let slot: Arc<Slot<T, dyn signal::Signal + Send + Sync>> = slot.clone();
+                                    wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot));
+                                }
+                                let item = slot.0.lock().take();
+                                item.ok_or_else(|| if self.disconnected.load(Ordering::Relaxed) {
+                                    TryRecvTimeoutError::Disconnected
+                                } else {
+                                    TryRecvTimeoutError::Timeout
+                                })
+                            })
+                    } else {
+                        slot.wait_recv(&self.disconnected)
+                            .ok_or(TryRecvTimeoutError::Disconnected)
+                    }
+                } else {
+                    Err(TryRecvTimeoutError::Empty)
+                }
+            },
+            Chan::Unbounded(inner) => {
+                let mut inner_guard = wait_lock(inner);
+                if let Some(item) = inner_guard.queue.pop_front() {
+                    Ok(item)
+                } else if self.disconnected.load(Ordering::SeqCst) {
+                    Err(TryRecvTimeoutError::Disconnected)
+                } else if let Some(deadline) = block {
+                    let slot = Slot::<_, signal::SyncSignal>::new(None);
+                    inner_guard.waiting.push_back(slot.clone());
+                    drop(inner_guard);
+
+                    if let Some(deadline) = deadline {
+                        slot.wait_deadline_recv(&self.disconnected, deadline)
+                            .or_else(|timed_out| {
+                                if timed_out { // Remove our signal
+                                    let slot: Arc<Slot<T, dyn signal::Signal + Send + Sync>> = slot.clone();
+                                    wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot));
+                                }
+                                let item = slot.0.lock().take();
+                                item.ok_or_else(|| if self.disconnected.load(Ordering::Relaxed) {
+                                    TryRecvTimeoutError::Disconnected
+                                } else {
+                                    TryRecvTimeoutError::Timeout
+                                })
+                            })
+                    } else {
+                        slot.wait_recv(&self.disconnected)
+                            .ok_or(TryRecvTimeoutError::Disconnected)
+                    }
+                } else {
+                    Err(TryRecvTimeoutError::Empty)
+                }
+            },
         }
     }
 
@@ -336,16 +462,19 @@ impl<T> Shared<T> {
     /// items that have already been sent)
     fn disconnect_all(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
+
         match &self.chan {
-            Channel::Bounded { pending, .. } => {
-                let pending = wait_lock(&pending);
-                pending.senders.iter().for_each(|s| s.notify_all(()));
-                pending.receivers.iter().for_each(|s| s.notify_all(()));
+            Chan::Bounded(cap, inner) => {
+                let mut inner = inner.lock();
+                inner.pull_pending(*cap);
+                inner.sending.iter().for_each(|slot| slot.signal().fire());
+                inner.waiting.iter().for_each(|slot| slot.signal().fire());
             },
-            Channel::Unbounded { queue, send_signal } => {
-                let queue = wait_lock(&queue);
-                send_signal.notify_all(queue);
-            },
+            Chan::Unbounded(inner) => inner
+                .lock()
+                .waiting
+                .iter()
+                .for_each(|slot| slot.signal().fire()),
         }
     }
 
@@ -359,21 +488,19 @@ impl<T> Shared<T> {
 
     fn len_inner(&self) -> usize {
         match &self.chan {
-            Channel::Bounded { pending, cap } => {
-                let mut pending = wait_lock(&pending);
-                pull_pending(*cap, &mut pending);
-                pending.queue.len()
+            Chan::Bounded(cap, inner) => {
+                let mut inner = inner.lock();
+                inner.pull_pending(*cap);
+                inner.queue.len()
             },
-            Channel::Unbounded { queue, .. } => {
-                wait_lock(&queue).len()
-            },
+            Chan::Unbounded(inner) => inner.lock().queue.len(),
         }
     }
 
     fn capacity_inner(&self) -> Option<usize> {
         match &self.chan {
-            Channel::Bounded { cap, .. } => Some(*cap),
-            Channel::Unbounded { .. } => None,
+            Chan::Bounded(cap, _) => Some(*cap),
+            Chan::Unbounded(_) => None,
         }
     }
 }
@@ -384,81 +511,10 @@ pub struct Sender<T> {
 }
 
 impl<T> Sender<T> {
-    #[inline(always)]
-    fn send_inner(&self, msg: T, block: Option<Option<Instant>>) -> Result<(), TrySendTimeoutError<T>> {
-        match &self.shared.chan {
-            Channel::Bounded { cap, pending: pending_lock } => {
-                let mut pending = wait_lock(&pending_lock);
-                if self.shared.disconnected.load(Ordering::Relaxed) {
-                    return Err(TrySendTimeoutError::Disconnected(msg));
-                } else if let Some(recv) = pending.receivers.pop_front() {
-                    debug_assert!(pending.queue.len() == 0);
-                    recv.notify_one_with((), |m| *m = Some(msg));
-                    Ok(())
-                } else if pending.queue.len() < *cap {
-                    pending.queue.push_back(msg);
-                    Ok(())
-                } else if let Some(deadline) = block {
-                    self.shared.sig_depot.with_one(
-                        || Arc::new(Signal::default()),
-                        move |sig| {
-                            *sig.lock() = Some(msg);
-                            pending.senders.push_back(sig.clone());
-
-                            if let Some(deadline) = deadline {
-                                let now = Instant::now();
-                                let timeout = sig.wait_timeout_while(
-                                    pending,
-                                    deadline.saturating_duration_since(now),
-                                    |msg| msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed),
-                                );
-
-                                if let Some(msg) = sig.lock().take() {
-                                    if timeout.timed_out() {
-                                        // Remove our signal
-                                        wait_lock(&pending_lock).senders.retain(|slot| !Arc::ptr_eq(slot, sig));
-
-                                        Err(TrySendTimeoutError::Timeout(msg))
-                                    } else {
-                                        Err(TrySendTimeoutError::Disconnected(msg))
-                                    }
-                                } else {
-                                    Ok(())
-                                }
-                            } else {
-                                sig.wait_while(pending, |msg| {
-                                    msg.is_some() && !self.shared.disconnected.load(Ordering::Relaxed)
-                                });
-
-                                if let Some(msg) = sig.lock().take() {
-                                    Err(TrySendTimeoutError::Disconnected(msg))
-                                } else {
-                                    Ok(())
-                                }
-                            }
-                        },
-                    )
-                } else {
-                    Err(TrySendTimeoutError::Full(msg))
-                }
-            },
-            Channel::Unbounded { queue, send_signal } => {
-                if self.shared.disconnected.load(Ordering::Relaxed) {
-                    Err(TrySendTimeoutError::Disconnected(msg))
-                } else {
-                    let mut queue = wait_lock(&queue);
-                    queue.push_back(msg);
-                    send_signal.notify_one(queue);
-                    Ok(())
-                }
-            },
-        }
-    }
-
     /// Send a value into the channel, returning an error if the channel receiver has
     /// been dropped. If the channel is bounded and is full, this method will block.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        self.send_inner(msg, Some(None)).map_err(|err| match err {
+        self.shared.send(msg, Some(None)).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendError(msg),
             _ => unreachable!(),
         })
@@ -468,7 +524,7 @@ impl<T> Sender<T> {
     /// receiver has been dropped, an error is returned. If the channel associated with this
     /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        self.send_inner(msg, None).map_err(|err| match err {
+        self.shared.send(msg, None).map_err(|err| match err {
             TrySendTimeoutError::Full(msg) => TrySendError::Full(msg),
             TrySendTimeoutError::Disconnected(msg) => TrySendError::Disconnected(msg),
             _ => unreachable!(),
@@ -479,7 +535,7 @@ impl<T> Sender<T> {
     /// been dropped or the deadline has passed. If the channel is bounded and is full, this method
     /// will block.
     pub fn send_deadline(&self, msg: T, deadline: Instant) -> Result<(), SendTimeoutError<T>> {
-        self.send_inner(msg, Some(Some(deadline))).map_err(|err| match err {
+        self.shared.send(msg, Some(Some(deadline))).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendTimeoutError::Disconnected(msg),
             TrySendTimeoutError::Timeout(msg) => SendTimeoutError::Timeout(msg),
             _ => unreachable!(),
@@ -545,113 +601,11 @@ pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
 }
 
-fn pull_pending<T>(
-    effective_cap: usize,
-    pending: &mut BoundedQueues<T>,
-) {
-    while pending.queue.len() < effective_cap {
-        if let Some(signal) = pending.senders.pop_front() {
-            let mut msg = None;
-            signal.notify_one_with((), |m| msg = m.take());
-            if let Some(msg) = msg {
-                pending.queue.push_back(msg);
-            }
-        } else {
-            break;
-        }
-    }
-}
-
 impl<T> Receiver<T> {
-    #[inline(always)]
-    fn recv_inner(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
-        match &self.shared.chan {
-            Channel::Bounded { cap, pending: pending_lock } => {
-                let mut pending = wait_lock(&pending_lock);
-                pull_pending(*cap + 1, &mut pending);
-                if let Some(msg) = pending.queue.pop_front() {
-                    Ok(msg)
-                } else if self.shared.disconnected.load(Ordering::Relaxed) {
-                    return Err(TryRecvTimeoutError::Disconnected);
-                } else if let Some(deadline) = block {
-                    self.shared.sig_depot.with_one(
-                        || Arc::new(Signal::default()),
-                        move |sig| {
-                            pending.receivers.push_back(sig.clone());
-
-                            if let Some(deadline) = deadline {
-                                let now = Instant::now();
-                                if sig.wait_timeout_while(
-                                    pending,
-                                    deadline.saturating_duration_since(now),
-                                    |msg| msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed),
-                                ).timed_out() {
-                                    // There is a problem here. When calling `rx.recv()`, a signal
-                                    // gets inserted into the receiver queue to be matched with
-                                    // a sent item later, causing it to unblock. However, calling
-                                    // `rx.recv_timeout()` may exit early, leaving a "phoney"
-                                    // signal in the receiver queue that is no longer valid. To
-                                    // resolve this, we do something a little hacky: run through
-                                    // the receiver queue, find our signal, and remove it. This is
-                                    // expensive, but thankfully it's an edge-case that hopefully
-                                    // won't have an impact on performance-critical code (after
-                                    // all, this only happens when a timeout has occurred).
-                                    let mut pending = wait_lock(&pending_lock);
-                                    // Remove our signal
-                                    pending.receivers.retain(|slot| !Arc::ptr_eq(slot, sig));
-                                    // Check one last time for a value - perhaps one got added in
-                                    // the meantime?
-                                    return match sig.lock().take() {
-                                        Some(msg) => Ok(msg),
-                                        None => Err(TryRecvTimeoutError::Timeout),
-                                    };
-                                }
-                            } else {
-                                sig.wait_while(pending, |msg| {
-                                    msg.is_none() && !self.shared.disconnected.load(Ordering::Relaxed)
-                                });
-                            }
-
-                            sig
-                                .lock()
-                                .take()
-                                .ok_or(TryRecvTimeoutError::Disconnected)
-                        },
-                    )
-                } else {
-                    Err(TryRecvTimeoutError::Empty)
-                }
-            },
-            Channel::Unbounded { send_signal, queue } => loop {
-                let mut queue = wait_lock(&queue);
-                if let Some(msg) = queue.pop_front() {
-                    break Ok(msg);
-                } else if self.shared.disconnected.load(Ordering::Relaxed) {
-                    break Err(TryRecvTimeoutError::Disconnected);
-                } else if let Some(deadline) = block {
-                    if let Some(deadline) = deadline {
-                        let now = Instant::now();
-                        if send_signal
-                            .wait_timeout(queue, deadline.saturating_duration_since(now))
-                            .timed_out()
-                        {
-                            break Err(TryRecvTimeoutError::Timeout);
-                        }
-                    } else {
-                        send_signal.wait(queue);
-                    }
-                } else {
-                    break Err(TryRecvTimeoutError::Empty);
-                }
-            },
-        }
-    }
-
-
     /// Attempt to fetch an incoming value from the channel associated with this receiver,
     /// returning an error if the channel is empty or all channel senders have been dropped.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.recv_inner(None).map_err(|err| match err {
+        self.shared.recv(None).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => TryRecvError::Disconnected,
             TryRecvTimeoutError::Empty => TryRecvError::Empty,
             _ => unreachable!(),
@@ -661,7 +615,7 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.recv_inner(Some(None)).map_err(|err| match err {
+        self.shared.recv(Some(None)).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
             _ => unreachable!(),
         })
@@ -670,7 +624,7 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        self.recv_inner(Some(Some(deadline))).map_err(|err| match err {
+        self.shared.recv(Some(Some(deadline))).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
             TryRecvTimeoutError::Timeout => RecvTimeoutError::Timeout,
             _ => unreachable!(),
@@ -712,13 +666,12 @@ impl<T> Receiver<T> {
             // Rendezvous is suppose to be an instant handover, so it doesn't make conceptual sense
             // for the channel to have items sitting in it
             // Channel::Rendezvous { .. } => VecDeque::new(),
-            Channel::Bounded { cap, pending } => {
-                let mut pending = wait_lock(&pending);
-                let msgs = std::mem::take(&mut pending.queue);
-                pull_pending(*cap, &mut pending);
-                msgs
+            Chan::Bounded(cap, inner) => {
+                let mut inner = inner.lock();
+                inner.pull_pending(*cap);
+                std::mem::take(&mut inner.queue)
             },
-            Channel::Unbounded { queue, .. } => std::mem::take(&mut *wait_lock(&queue)),
+            Chan::Unbounded(inner) => std::mem::take(&mut inner.lock().queue),
         };
 
         Drain { queue, _phantom: PhantomData }

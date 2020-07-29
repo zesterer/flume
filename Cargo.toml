@@ -17,7 +17,7 @@ async = ["futures"]
 default = ["select", "async"]
 
 [dependencies]
-spin = "0.5"
+spinning_top = "0.2"
 futures = { version = "^0.3", default-features = false, optional = true }
 
 [dev-dependencies]

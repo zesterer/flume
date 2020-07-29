@@ -128,7 +128,6 @@ fn recv_timeout() {
         scope.spawn(move |_| {
             thread::sleep(ms(1500));
             s.send(7).unwrap();
-            println!("HERE!");
         });
     })
     .unwrap();
