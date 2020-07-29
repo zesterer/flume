@@ -3,7 +3,7 @@ use flume::*;
 
 #[cfg(feature = "async")]
 #[test]
-fn r#async() {
+fn r#async_recv() {
     let (tx, mut rx) = unbounded();
 
     let t = std::thread::spawn(move || {
@@ -13,6 +13,23 @@ fn r#async() {
 
     async_std::task::block_on(async {
         assert_eq!(rx.recv_async().await.unwrap(), 42);
+    });
+
+    t.join().unwrap();
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn r#async_send() {
+    let (tx, mut rx) = bounded(1);
+
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert_eq!(rx.recv(), Ok(42));
+    });
+
+    async_std::task::block_on(async {
+        tx.send_async(42u32).await.unwrap();
     });
 
     t.join().unwrap();

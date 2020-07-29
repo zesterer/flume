@@ -3,270 +3,260 @@
 use std::{
     future::Future,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     fmt,
 };
-use crate::*;
+use crate::{*, signal::Signal};
 use futures::{Stream, stream::FusedStream, future::FusedFuture, Sink};
 
-impl<T> Receiver<T> {
-    #[inline]
-    fn poll(&self, cx: &mut Context<'_>) -> Poll<Result<T, RecvError>> {
-        let mut buf = self.buffer.borrow_mut();
+struct AsyncSignal(Waker);
 
-        let res = if let Some(msg) = buf.pop_front() {
-            return Poll::Ready(Ok(msg)); // Avoid the need to lock the inner
-        } else {
-            self
-                .shared
-                .poll_inner()
-                .map(|mut inner| self
-                    .shared
-                    .try_recv(
-                        move || {
-                            // Detach the waker
-                            inner.recv_waker = None;
-                            // Inform the sender that we no longer need waking
-                            inner.listen_mode = 1;
-                            inner
-                        },
-                        &mut buf,
-                        &self.finished,
-                    )
-                )
-        };
-
-        let poll = match res {
-            Some(Ok(msg)) => Poll::Ready(Ok(msg)),
-            Some(Err((_, TryRecvError::Disconnected))) => Poll::Ready(Err(RecvError::Disconnected)),
-            Some(Err((mut inner, TryRecvError::Empty))) => {
-                // Inform the sender that we need waking
-                inner.recv_waker = Some(cx.waker().clone());
-                inner.listen_mode = 2;
-                Poll::Pending
-            },
-            // Can't access the inner lock, try again
-            None => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            },
-        };
-
-        poll
+impl Signal for AsyncSignal {
+    fn fire(&self) {
+        self.0.wake_by_ref()
     }
 }
 
-/// A future  used to receive a value from the channel.
-pub struct RecvFuture<'a, T> {
-    recv: &'a mut Receiver<T>,
-}
+// TODO: Wtf happens with timeout races? Futures can still receive items when not being actively polled...
+// Is this okay? I guess it must be? How do other async channel crates handle it?
 
-impl<'a, T> RecvFuture<'a, T> {
-    pub(crate) fn new(recv: &mut Receiver<T>) -> RecvFuture<T> {
-        RecvFuture { recv }
+impl<T: Unpin> Sender<T> {
+    /// Asynchronously send a value into the channel, returning an error if the channel receiver has
+    /// been dropped. If the channel is bounded and is full, this method will yield to the async runtime.
+    pub fn send_async(&self, item: T) -> impl Future<Output=Result<(), SendError<T>>> + '_ {
+        SendFut {
+            shared: &self.shared,
+            slot: Some(Err(item)),
+        }
     }
-}
 
-impl<'a, T> Future for RecvFuture<'a, T> {
-    type Output = Result<T, RecvError>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.recv.poll(cx)
-    }
-}
-
-impl<'a, T> FusedFuture for RecvFuture<'a, T> {
-    fn is_terminated(&self) -> bool {
-        self.recv.finished.get()
-    }
-}
-
-enum PollSendError<T> {
-    Full(T),
-    Disconnected(T),
-    CouldNotLock(T),
-}
-
-impl<T> PollSendError<T> {
-    fn into_message(self) -> T {
-        match self {
-            PollSendError::Full(m) => m,
-            PollSendError::Disconnected(m) => m,
-            PollSendError::CouldNotLock(m) => m,
+    /// Use this channel as an asynchronous item sink.
+    pub fn sink(&self, item: T) -> impl Sink<T, Error=SendError<T>> + '_ {
+        SendFut {
+            shared: &self.shared,
+            slot: None,
         }
     }
 }
 
-impl<T> Sender<T> {
-    pub fn sink(&self) -> SenderSink<T> {
-        SenderSink::new(self)
-    }
+pub struct SendFut<'a, T: Unpin> {
+    shared: &'a Shared<T>,
+    slot: Option<Result<Arc<Slot<T, AsyncSignal>>, T>>,
+}
 
-    #[inline]
-    fn poll(&self, msg: T, cx: &mut Context<'_>) -> Result<(), PollSendError<T>> {
-        let mut inner = match self.shared.poll_inner() {
-            Some(inner) => inner,
-            None => {
-                cx.waker().wake_by_ref();
-                return Err(PollSendError::CouldNotLock(msg));
-            },
-        };
-
-        if inner.listen_mode == 0 {
-            // If the listener has disconnected, the channel is dead
-            return Err(PollSendError::Disconnected(msg));
-        }
-        // If pushing fails, it's because the queue is full
-        match inner.queue.push(msg) {
-            Err(msg) => {
-                // Let the receiver know that we need to be woken
-                inner.send_wakers.push_back(cx.waker().clone());
-                return Err(PollSendError::Full(msg))
-            },
-            Ok(()) => {},
-        };
-
-        self.shared.send_notify(inner);
-        Ok(())
+impl<'a, T: Unpin> Drop for SendFut<'a, T> {
+    fn drop(&mut self) {
+        self.slot
+            .take()
+            .and_then(|slot| slot.ok())
+            .map(|slot| {
+                let slot: Arc<Slot<T, dyn Signal + Send + Sync>> = slot;
+                match &self.shared.chan {
+                    Chan::Bounded(_, inner) => wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot)),
+                    Chan::Unbounded(inner) => wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot)),
+                }
+            });
     }
 }
 
-impl<T> Stream for Receiver<T> {
-    type Item = T;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.poll(cx).map(|ready| ready.ok())
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.buffer.borrow().len(), None)
-    }
-}
-
-impl<T> FusedStream for Receiver<T> {
-    fn is_terminated(&self) -> bool {
-        self.finished.get()
-    }
-}
-
-/// Error returned when a send future or sink linked to a disconnected sender is polled. To retrieve
-/// the associated message, call the `into_message` method of the `SendFuture` or `into_pending`
-/// method of the `SinkSender`.
-#[derive(Debug)]
-pub struct Disconnected;
-
-impl fmt::Display for Disconnected {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        "sending on a disconnected channel".fmt(f)
-    }
-}
-
-impl std::error::Error for Disconnected {}
-
-pub struct SendFuture<'a, T> {
-    send: &'a Sender<T>,
-    msg: Option<T>,
-}
-
-impl<'a, T> SendFuture<'a, T> {
-    pub(crate) fn new(send: &Sender<T>, msg: T) -> SendFuture<T> {
-        SendFuture { send, msg: Some(msg) }
-    }
-}
-
-impl<'a, T> SendFuture<'a, T> {
-    pub fn into_message(self) -> Option<T> {
-        self.msg
-    }
-}
-
-impl<'a, T: Unpin> Future for SendFuture<'a, T> {
-    type Output = Result<(), Disconnected>;
+impl<'a, T: Unpin> Future for SendFut<'a, T> {
+    type Output = Result<(), SendError<T>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.msg.take() {
-            Some(msg) => match self.send.poll(msg, cx) {
-                Ok(()) => Poll::Ready(Ok(())),
-                Err(PollSendError::Disconnected(m)) => {
-                    self.msg.replace( m);
-                    Poll::Ready(Err(Disconnected))
-                },
-                Err(e) => { // Need to wait a bit... poll will be rescheduled by `send.poll`
-                    self.msg.replace(e.into_message());
+        if let Some(Ok(slot)) = self.slot.as_ref() {
+            return if slot.is_empty() {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            };
+        }
+
+        let item = match self.slot.take().unwrap() {
+            Err(item) => item,
+            Ok(_) => return Poll::Ready(Ok(())),
+        };
+
+        match &self.shared.chan {
+            Chan::Bounded(cap, inner) => {
+                let mut inner_guard = wait_lock(inner);
+
+                if self.shared.disconnected.load(Ordering::SeqCst) {
+                    Poll::Ready(Err(SendError(item)))
+                } else if let Some(r) = inner_guard.waiting.pop_front() {
+                    debug_assert!(inner_guard.queue.len() == 0);
+                    r.fire_send(item);
+                    Poll::Ready(Ok(()))
+                } else if inner_guard.queue.len() < *cap {
+                    inner_guard.queue.push_back(item);
+                    Poll::Ready(Ok(()))
+                } else {
+                    let slot = Slot::new(Some(item), AsyncSignal(cx.waker().clone()));
+                    inner_guard.sending.push_back(slot.clone());
+                    drop(inner_guard);
+                    self.slot = Some(Ok(slot));
                     Poll::Pending
-                },
+                }
             },
-            None => Poll::Pending,
+            Chan::Unbounded(inner) => {
+                let mut inner_guard = wait_lock(inner);
+
+                if self.shared.disconnected.load(Ordering::SeqCst) {
+                    Poll::Ready(Err(SendError(item)))
+                } else if let Some(r) = inner_guard.waiting.pop_front() {
+                    drop(inner_guard);
+                    r.fire_send(item);
+                    Poll::Ready(Ok(()))
+                } else {
+                    inner_guard.queue.push_back(item);
+                    Poll::Ready(Ok(()))
+                }
+            },
         }
     }
 }
 
-impl<'a, T: Unpin> FusedFuture for SendFuture<'a, T> {
+impl<'a, T: Unpin> FusedFuture for SendFut<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.send.disconnected.get()
+        self.shared.disconnected.load(Ordering::SeqCst)
     }
 }
 
-pub struct SenderSink<'a, T> {
-    buf: VecDeque<T>,
-    send: &'a Sender<T>,
-}
+impl<'a, T: Unpin> Sink<T> for SendFut<'a, T> {
+    type Error = SendError<T>;
 
-impl<'a, T> SenderSink<'a, T> {
-    fn new(send: &'a Sender<T>) -> Self {
-        SenderSink {
-            buf: VecDeque::new(),
-            send,
-        }
-    }
-
-    pub fn into_pending(self) -> Vec<T> {
-        self.buf.into()
-    }
-}
-
-impl<'a, T: Unpin> Sink<T> for SenderSink<'a, T> {
-    type Error = Disconnected;
-
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if !self.send.disconnected.get() {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Ready(Err(Disconnected))
-        }
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.poll(cx)
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        if !self.send.disconnected.get() {
-            self.buf.push_back(item);
-            Ok(())
-        } else {
-            Err(Disconnected)
-        }
+        *self = SendFut {
+            shared: &self.shared,
+            slot: Some(Err(item)),
+        };
+
+        Ok(())
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.send.disconnected.get() {
-            return Poll::Ready(Err(Disconnected));
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.poll(cx) // TODO: A different strategy here?
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        self.poll(cx) // TODO: A different strategy here?
+    }
+}
+
+impl<T> Receiver<T> {
+    /// Asynchronously wait for an incoming value from the channel associated with this receiver,
+    /// returning an error if all channel senders have been dropped.
+    pub fn recv_async(&self) -> impl Future<Output=Result<T, RecvError>> + '_ {
+        RecvFut::new(&self.shared)
+    }
+
+    /// Use this channel as an asynchronous stream of items.
+    pub fn stream(&self) -> impl Stream<Item=T> + '_ {
+        RecvFut::new(&self.shared)
+    }
+}
+
+pub struct RecvFut<'a, T> {
+    shared: &'a Shared<T>,
+    slot: Option<Arc<Slot<T, AsyncSignal>>>,
+}
+
+impl<'a, T> RecvFut<'a, T> {
+    fn new(shared: &'a Shared<T>) -> Self {
+        Self {
+            shared,
+            slot: None,
+        }
+    }
+}
+
+impl<'a, T> Drop for RecvFut<'a, T> {
+    fn drop(&mut self) {
+        self.slot
+            .take()
+            .map(|slot| {
+                let slot: Arc<Slot<T, dyn Signal + Send + Sync>> = slot;
+                match &self.shared.chan {
+                    Chan::Bounded(_, inner) => wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot)),
+                    Chan::Unbounded(inner) => wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot)),
+                }
+            });
+    }
+}
+
+impl<'a, T> Future for RecvFut<'a, T> {
+    type Output = Result<T, RecvError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(slot) = self.slot.as_ref() {
+            return match slot.try_take() {
+                Some(item) => Poll::Ready(Ok(item)),
+                None => Poll::Pending,
+            };
         }
 
-        match self.buf.pop_front() {
-            Some(msg) => match self.send.poll(msg, cx) {
-                Ok(()) => Poll::Ready(Ok(())),
-                Err(PollSendError::Disconnected(m)) => {
-                    self.buf.push_front(m);
-                    Poll::Ready(Err(Disconnected))
-                },
-                Err(e) => { // Need to wait a bit... poll will be rescheduled by `send.poll`
-                    self.buf.push_front(e.into_message());
+        match &self.shared.chan {
+            Chan::Bounded(cap, inner) => {
+                let mut inner_guard = wait_lock(inner);
+                inner_guard.pull_pending(*cap + 1); // Effective cap of cap + 1 because we're going to be popping one
+
+                if let Some(item) = inner_guard.queue.pop_front() {
+                    Poll::Ready(Ok(item))
+                } else if self.shared.disconnected.load(Ordering::SeqCst) {
+                    Poll::Ready(Err(RecvError::Disconnected))
+                } else {
+                    let slot = Slot::new(None, AsyncSignal(cx.waker().clone()));
+                    inner_guard.waiting.push_back(slot.clone());
+                    drop(inner_guard);
+                    self.slot = Some(slot);
                     Poll::Pending
-                },
+                }
             },
-            None => Poll::Ready(Ok(())),
+            Chan::Unbounded(inner) => {
+                let mut inner_guard = wait_lock(inner);
+
+                if let Some(item) = inner_guard.queue.pop_front() {
+                    Poll::Ready(Ok(item))
+                } else if self.shared.disconnected.load(Ordering::SeqCst) {
+                    Poll::Ready(Err(RecvError::Disconnected))
+                } else {
+                    let slot = Slot::new(None, AsyncSignal(cx.waker().clone()));
+                    inner_guard.waiting.push_back(slot.clone());
+                    drop(inner_guard);
+                    self.slot = Some(slot);
+                    Poll::Pending
+                }
+            },
         }
     }
+}
 
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.poll_flush(cx)
+impl<'a, T> FusedFuture for RecvFut<'a, T> {
+    fn is_terminated(&self) -> bool {
+        self.shared.disconnected.load(Ordering::SeqCst)
+    }
+}
+
+impl<'a, T> Stream for RecvFut<'a, T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.as_mut().poll(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(item) => {
+                // Replace the recv future for every item we receive
+                *self = RecvFut::new(self.shared);
+                Poll::Ready(item.ok())
+            },
+        }
+    }
+}
+
+impl<'a, T> FusedStream for RecvFut<'a, T> {
+    fn is_terminated(&self) -> bool {
+        self.shared.disconnected.load(Ordering::SeqCst)
     }
 }
