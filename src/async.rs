@@ -39,23 +39,17 @@ impl<T: Unpin> Sender<T> {
     }
 }
 
-pub struct SendFut<'a, T: Unpin> {
+struct SendFut<'a, T: Unpin> {
     shared: &'a Shared<T>,
     slot: Option<Result<Arc<Slot<T, AsyncSignal>>, T>>,
 }
 
 impl<'a, T: Unpin> Drop for SendFut<'a, T> {
     fn drop(&mut self) {
-        self.slot
-            .take()
-            .and_then(|slot| slot.ok())
-            .map(|slot| {
-                let slot: Arc<Slot<T, dyn Signal + Send + Sync>> = slot;
-                match &self.shared.chan {
-                    Chan::Bounded(_, inner) => wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot)),
-                    Chan::Unbounded(inner) => wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot)),
-                }
-            });
+        if let Some(Ok(slot)) = self.slot.take() {
+            let slot: Arc<Slot<T, dyn Signal>> = slot;
+            wait_lock(&self.shared.chan).sending.as_mut().unwrap().1.retain(|s| !Arc::ptr_eq(s, &slot));
+        }
     }
 }
 
@@ -69,48 +63,27 @@ impl<'a, T: Unpin> Future for SendFut<'a, T> {
             } else {
                 Poll::Pending
             };
-        }
-
-        let item = match self.slot.take().unwrap() {
-            Err(item) => item,
-            Ok(_) => return Poll::Ready(Ok(())),
-        };
-
-        match &self.shared.chan {
-            Chan::Bounded(cap, inner) => {
-                let mut inner_guard = wait_lock(inner);
-
-                if self.shared.disconnected.load(Ordering::SeqCst) {
-                    Poll::Ready(Err(SendError(item)))
-                } else if let Some(r) = inner_guard.waiting.pop_front() {
-                    debug_assert!(inner_guard.queue.len() == 0);
-                    r.fire_send(item);
-                    Poll::Ready(Ok(()))
-                } else if inner_guard.queue.len() < *cap {
-                    inner_guard.queue.push_back(item);
-                    Poll::Ready(Ok(()))
-                } else {
-                    let slot = Slot::new(Some(item), AsyncSignal(cx.waker().clone()));
-                    inner_guard.sending.push_back(slot.clone());
-                    drop(inner_guard);
+        } else {
+            self.shared.send(
+                // item
+                match self.slot.take().unwrap() {
+                    Err(item) => item,
+                    Ok(_) => return Poll::Ready(Ok(())),
+                },
+                // should_block
+                true,
+                // make_signal
+                || AsyncSignal(cx.waker().clone()),
+                // do_block
+                |slot| {
                     self.slot = Some(Ok(slot));
                     Poll::Pending
                 }
-            },
-            Chan::Unbounded(inner) => {
-                let mut inner_guard = wait_lock(inner);
-
-                if self.shared.disconnected.load(Ordering::SeqCst) {
-                    Poll::Ready(Err(SendError(item)))
-                } else if let Some(r) = inner_guard.waiting.pop_front() {
-                    drop(inner_guard);
-                    r.fire_send(item);
-                    Poll::Ready(Ok(()))
-                } else {
-                    inner_guard.queue.push_back(item);
-                    Poll::Ready(Ok(()))
-                }
-            },
+            )
+                .map(|r| r.map_err(|err| match err {
+                    TrySendTimeoutError::Disconnected(msg) => SendError(msg),
+                    _ => unreachable!(),
+                }))
         }
     }
 }
@@ -159,7 +132,7 @@ impl<T> Receiver<T> {
     }
 }
 
-pub struct RecvFut<'a, T> {
+struct RecvFut<'a, T> {
     shared: &'a Shared<T>,
     slot: Option<Arc<Slot<T, AsyncSignal>>>,
 }
@@ -175,15 +148,10 @@ impl<'a, T> RecvFut<'a, T> {
 
 impl<'a, T> Drop for RecvFut<'a, T> {
     fn drop(&mut self) {
-        self.slot
-            .take()
-            .map(|slot| {
-                let slot: Arc<Slot<T, dyn Signal + Send + Sync>> = slot;
-                match &self.shared.chan {
-                    Chan::Bounded(_, inner) => wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot)),
-                    Chan::Unbounded(inner) => wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot)),
-                }
-            });
+        if let Some(slot) = self.slot.take() {
+            let slot: Arc<Slot<T, dyn Signal>> = slot;
+            wait_lock(&self.shared.chan).waiting.retain(|s| !Arc::ptr_eq(s, &slot));
+        }
     }
 }
 
@@ -196,40 +164,22 @@ impl<'a, T> Future for RecvFut<'a, T> {
                 Some(item) => Poll::Ready(Ok(item)),
                 None => Poll::Pending,
             };
-        }
-
-        match &self.shared.chan {
-            Chan::Bounded(cap, inner) => {
-                let mut inner_guard = wait_lock(inner);
-                inner_guard.pull_pending(*cap + 1); // Effective cap of cap + 1 because we're going to be popping one
-
-                if let Some(item) = inner_guard.queue.pop_front() {
-                    Poll::Ready(Ok(item))
-                } else if self.shared.disconnected.load(Ordering::SeqCst) {
-                    Poll::Ready(Err(RecvError::Disconnected))
-                } else {
-                    let slot = Slot::new(None, AsyncSignal(cx.waker().clone()));
-                    inner_guard.waiting.push_back(slot.clone());
-                    drop(inner_guard);
+        } else {
+            self.shared.recv(
+                // should_block
+                true,
+                // make_signal
+                || AsyncSignal(cx.waker().clone()),
+                // do_block
+                |slot| {
                     self.slot = Some(slot);
                     Poll::Pending
                 }
-            },
-            Chan::Unbounded(inner) => {
-                let mut inner_guard = wait_lock(inner);
-
-                if let Some(item) = inner_guard.queue.pop_front() {
-                    Poll::Ready(Ok(item))
-                } else if self.shared.disconnected.load(Ordering::SeqCst) {
-                    Poll::Ready(Err(RecvError::Disconnected))
-                } else {
-                    let slot = Slot::new(None, AsyncSignal(cx.waker().clone()));
-                    inner_guard.waiting.push_back(slot.clone());
-                    drop(inner_guard);
-                    self.slot = Some(slot);
-                    Poll::Pending
-                }
-            },
+            )
+                .map(|r| r.map_err(|err| match err {
+                    TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
+                    _ => unreachable!(),
+                }))
         }
     }
 }

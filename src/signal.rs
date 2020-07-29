@@ -1,6 +1,6 @@
 use std::{thread::{self, Thread}, time::Duration};
 
-pub trait Signal {
+pub trait Signal: Send + Sync + 'static {
     fn fire(&self);
 }
 

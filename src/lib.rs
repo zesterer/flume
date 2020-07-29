@@ -267,32 +267,26 @@ fn wait_lock<'a, T>(lock: &'a Spinlock<T>) -> SpinlockGuard<'a, T> {
 //     lock.lock().unwrap()
 // }
 
-struct Bounded<T> {
-    sending: VecDeque<Arc<Slot<T, dyn signal::Signal + Send + Sync>>>,
+struct Chan<T> {
+    sending: Option<(usize, VecDeque<Arc<Slot<T, dyn signal::Signal>>>)>,
     queue: VecDeque<T>,
-    waiting: VecDeque<Arc<Slot<T, dyn signal::Signal + Send + Sync>>>,
+    waiting: VecDeque<Arc<Slot<T, dyn signal::Signal>>>,
 }
 
-impl<T> Bounded<T> {
-    fn pull_pending(&mut self, effective_cap: usize) {
-        while self.queue.len() < effective_cap {
-            if let Some(s) = self.sending.pop_front() {
-                self.queue.push_back(s.fire_recv());
-            } else {
-                break;
+impl<T> Chan<T> {
+    fn pull_pending(&mut self, pull_extra: bool) {
+        if let Some((cap, sending)) = &mut self.sending {
+            let effective_cap = *cap + pull_extra as usize;
+
+            while self.queue.len() < effective_cap {
+                if let Some(s) = sending.pop_front() {
+                    self.queue.push_back(s.fire_recv());
+                } else {
+                    break;
+                }
             }
         }
     }
-}
-
-struct Unbounded<T> {
-    queue: VecDeque<T>,
-    waiting: VecDeque<Arc<Slot<T, dyn signal::Signal + Send + Sync>>>,
-}
-
-enum Chan<T> {
-    Bounded(usize, Spinlock<Bounded<T>>),
-    Unbounded(Spinlock<Unbounded<T>>),
 }
 
 enum Block {
@@ -302,7 +296,7 @@ enum Block {
 }
 
 struct Shared<T> {
-    chan: Chan<T>,
+    chan: Spinlock<Chan<T>>,
     disconnected: AtomicBool,
     sender_count: AtomicUsize,
     receiver_count: AtomicUsize,
@@ -311,157 +305,136 @@ struct Shared<T> {
 impl<T> Shared<T> {
     fn new(cap: Option<usize>) -> Self {
         Self {
-            chan: match cap {
-                Some(cap) => Chan::Bounded(cap, Spinlock::new(Bounded {
-                    sending: VecDeque::new(),
-                    queue: VecDeque::new(),
-                    waiting: VecDeque::new(),
-                })),
-                None => Chan::Unbounded(Spinlock::new(Unbounded {
-                    queue: VecDeque::new(),
-                    waiting: VecDeque::new(),
-                })),
-            },
+            chan: Spinlock::new(Chan {
+                sending: cap.map(|cap| (cap, VecDeque::new())),
+                queue: VecDeque::new(),
+                waiting: VecDeque::new(),
+            }),
             disconnected: AtomicBool::new(false),
             sender_count: AtomicUsize::new(1),
             receiver_count: AtomicUsize::new(1),
         }
     }
 
-    fn send(&self, item: T, block: Option<Option<Instant>>) -> Result<(), TrySendTimeoutError<T>> {
-        match &self.chan {
-            Chan::Bounded(cap, inner) => {
-                let mut inner_guard = wait_lock(inner);
+    fn send<S: Signal, R: From<Result<(), TrySendTimeoutError<T>>>>(
+        &self,
+        item: T,
+        should_block: bool,
+        make_signal: impl FnOnce() -> S,
+        do_block: impl FnOnce(Arc<Slot<T, S>>) -> R,
+    ) -> R {
+        let mut chan = wait_lock(&self.chan);
 
-                if self.disconnected.load(Ordering::SeqCst) {
-                    Err(TrySendTimeoutError::Disconnected(item))
-                } else if let Some(r) = inner_guard.waiting.pop_front() {
-                    debug_assert!(inner_guard.queue.len() == 0);
-                    r.fire_send(item);
-                    Ok(())
-                } else if inner_guard.queue.len() < *cap {
-                    inner_guard.queue.push_back(item);
-                    Ok(())
-                } else if let Some(deadline) = block {
-                    let slot = Slot::new(Some(item), SyncSignal::default());
-                    inner_guard.sending.push_back(slot.clone());
-                    drop(inner_guard);
+        if self.disconnected.load(Ordering::SeqCst) {
+            Err(TrySendTimeoutError::Disconnected(item)).into()
+        } else if let Some(r) = chan.waiting.pop_front() {
+            debug_assert!(chan.queue.len() == 0);
+            r.fire_send(item);
+            Ok(()).into()
+        } else if chan.sending.as_ref().map(|(cap, _)| chan.queue.len() < *cap).unwrap_or(true) {
+            chan.queue.push_back(item);
+            Ok(()).into()
+        } else if should_block { // Only bounded from here on
+            let slot = Slot::new(Some(item), make_signal());
+            chan.sending.as_mut().unwrap().1.push_back(slot.clone());
+            drop(chan);
 
-                    if let Some(deadline) = deadline {
-                        slot.wait_deadline_send(&self.disconnected, deadline)
-                            .or_else(|timed_out| {
-                                if timed_out { // Remove our signal
-                                    let slot: Arc<Slot<T, dyn signal::Signal + Send + Sync>> = slot.clone();
-                                    wait_lock(inner).sending.retain(|s| !Arc::ptr_eq(s, &slot));
-                                }
-                                let item = slot.0.lock().take();
-                                item.map(|item| if self.disconnected.load(Ordering::Relaxed) {
-                                    Err(TrySendTimeoutError::Disconnected(item))
-                                } else {
-                                    Err(TrySendTimeoutError::Timeout(item))
-                                })
-                                .unwrap_or(Ok(()))
-                            })
-                    } else {
-                        slot.wait_send(&self.disconnected);
-
-                        let item = slot.0.lock().take();
-                        match item {
-                            Some(item) => Err(TrySendTimeoutError::Disconnected(item)),
-                            None => Ok(()),
-                        }
-                    }
-                } else {
-                    Err(TrySendTimeoutError::Full(item))
-                }
-            },
-            Chan::Unbounded(inner) => {
-                let mut inner = wait_lock(inner);
-                if self.disconnected.load(Ordering::SeqCst) {
-                    Err(TrySendTimeoutError::Disconnected(item))
-                } else if let Some(r) = inner.waiting.pop_front() {
-                    drop(inner);
-                    r.fire_send(item);
-                    Ok(())
-                } else {
-                    inner.queue.push_back(item);
-                    Ok(())
-                }
-            },
+            do_block(slot)
+        } else {
+            Err(TrySendTimeoutError::Full(item)).into()
         }
     }
 
-    fn recv(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
-        match &self.chan {
-            Chan::Bounded(cap, inner) => {
-                let mut inner_guard = wait_lock(inner);
-                inner_guard.pull_pending(*cap + 1); // Effective cap of cap + 1 because we're going to be popping one
+    fn send_sync(
+        &self,
+        item: T,
+        block: Option<Option<Instant>>,
+    ) -> Result<(), TrySendTimeoutError<T>> {
+        self.send(
+            // item
+            item,
+            // should_block
+            block.is_some(),
+            // make_signal
+            || SyncSignal::default(),
+            // do_block
+            |slot| if let Some(deadline) = block.unwrap() {
+                slot.wait_deadline_send(&self.disconnected, deadline)
+                    .or_else(|timed_out| {
+                        if timed_out { // Remove our signal
+                            let slot: Arc<Slot<T, dyn signal::Signal>> = slot.clone();
+                            wait_lock(&self.chan).sending.as_mut().unwrap().1.retain(|s| !Arc::ptr_eq(s, &slot));
+                        }
+                        let item = slot.0.lock().take();
+                        item.map(|item| if self.disconnected.load(Ordering::Relaxed) {
+                            Err(TrySendTimeoutError::Disconnected(item))
+                        } else {
+                            Err(TrySendTimeoutError::Timeout(item))
+                        })
+                        .unwrap_or(Ok(()))
+                    })
+            } else {
+                slot.wait_send(&self.disconnected);
 
-                if let Some(item) = inner_guard.queue.pop_front() {
-                    Ok(item)
-                } else if self.disconnected.load(Ordering::SeqCst) {
-                    Err(TryRecvTimeoutError::Disconnected)
-                } else if let Some(deadline) = block {
-                    let slot = Slot::new(None, SyncSignal::default());
-                    inner_guard.waiting.push_back(slot.clone());
-                    drop(inner_guard);
-
-                    if let Some(deadline) = deadline {
-                        slot.wait_deadline_recv(&self.disconnected, deadline)
-                            .or_else(|timed_out| {
-                                if timed_out { // Remove our signal
-                                    let slot: Arc<Slot<T, dyn Signal + Send + Sync>> = slot.clone();
-                                    wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot));
-                                }
-                                let item = slot.0.lock().take();
-                                item.ok_or_else(|| if self.disconnected.load(Ordering::Relaxed) {
-                                    TryRecvTimeoutError::Disconnected
-                                } else {
-                                    TryRecvTimeoutError::Timeout
-                                })
-                            })
-                    } else {
-                        slot.wait_recv(&self.disconnected)
-                            .ok_or(TryRecvTimeoutError::Disconnected)
-                    }
-                } else {
-                    Err(TryRecvTimeoutError::Empty)
+                let item = slot.0.lock().take();
+                match item {
+                    Some(item) => Err(TrySendTimeoutError::Disconnected(item)),
+                    None => Ok(()),
                 }
             },
-            Chan::Unbounded(inner) => {
-                let mut inner_guard = wait_lock(inner);
-                if let Some(item) = inner_guard.queue.pop_front() {
-                    Ok(item)
-                } else if self.disconnected.load(Ordering::SeqCst) {
-                    Err(TryRecvTimeoutError::Disconnected)
-                } else if let Some(deadline) = block {
-                    let slot = Slot::new(None, SyncSignal::default());
-                    inner_guard.waiting.push_back(slot.clone());
-                    drop(inner_guard);
+        )
+    }
 
-                    if let Some(deadline) = deadline {
-                        slot.wait_deadline_recv(&self.disconnected, deadline)
-                            .or_else(|timed_out| {
-                                if timed_out { // Remove our signal
-                                    let slot: Arc<Slot<T, dyn Signal + Send + Sync>> = slot.clone();
-                                    wait_lock(inner).waiting.retain(|s| !Arc::ptr_eq(s, &slot));
-                                }
-                                let item = slot.0.lock().take();
-                                item.ok_or_else(|| if self.disconnected.load(Ordering::Relaxed) {
-                                    TryRecvTimeoutError::Disconnected
-                                } else {
-                                    TryRecvTimeoutError::Timeout
-                                })
-                            })
-                    } else {
-                        slot.wait_recv(&self.disconnected)
-                            .ok_or(TryRecvTimeoutError::Disconnected)
-                    }
-                } else {
-                    Err(TryRecvTimeoutError::Empty)
-                }
-            },
+    fn recv<S: Signal, R: From<Result<T, TryRecvTimeoutError>>>(
+        &self,
+        should_block: bool,
+        make_signal: impl FnOnce() -> S,
+        do_block: impl FnOnce(Arc<Slot<T, S>>) -> R,
+    ) -> R {
+        let mut chan = wait_lock(&self.chan);
+        chan.pull_pending(true);
+
+        if let Some(item) = chan.queue.pop_front() {
+            Ok(item).into()
+        } else if self.disconnected.load(Ordering::SeqCst) {
+            Err(TryRecvTimeoutError::Disconnected).into()
+        } else if should_block {
+            let slot = Slot::new(None, make_signal());
+            chan.waiting.push_back(slot.clone());
+            drop(chan);
+
+            do_block(slot)
+        } else {
+            Err(TryRecvTimeoutError::Empty).into()
         }
+    }
+
+    fn recv_sync(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
+        self.recv(
+            // should_block
+            block.is_some(),
+            // make_signal
+            || SyncSignal::default(),
+            // do_block
+            |slot| if let Some(deadline) = block.unwrap() {
+                slot.wait_deadline_recv(&self.disconnected, deadline)
+                    .or_else(|timed_out| {
+                        if timed_out { // Remove our signal
+                            let slot: Arc<Slot<T, dyn Signal>> = slot.clone();
+                            wait_lock(&self.chan).waiting.retain(|s| !Arc::ptr_eq(s, &slot));
+                        }
+                        let item = slot.0.lock().take();
+                        item.ok_or_else(|| if self.disconnected.load(Ordering::Relaxed) {
+                            TryRecvTimeoutError::Disconnected
+                        } else {
+                            TryRecvTimeoutError::Timeout
+                        })
+                    })
+            } else {
+                slot.wait_recv(&self.disconnected)
+                    .ok_or(TryRecvTimeoutError::Disconnected)
+            },
+        )
     }
 
     /// Disconnect anything listening on this channel (this will not prevent receivers receiving
@@ -469,45 +442,28 @@ impl<T> Shared<T> {
     fn disconnect_all(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
 
-        match &self.chan {
-            Chan::Bounded(cap, inner) => {
-                let mut inner = inner.lock();
-                inner.pull_pending(*cap);
-                inner.sending.iter().for_each(|slot| slot.signal().fire());
-                inner.waiting.iter().for_each(|slot| slot.signal().fire());
-            },
-            Chan::Unbounded(inner) => inner
-                .lock()
-                .waiting
-                .iter()
-                .for_each(|slot| slot.signal().fire()),
-        }
+        let mut chan = wait_lock(&self.chan);
+        chan.pull_pending(false);
+        chan.sending.as_ref().map(|(_, sending)| sending.iter().for_each(|slot| slot.signal().fire()));
+        chan.waiting.iter().for_each(|slot| slot.signal().fire());
     }
 
-    fn is_empty_inner(&self) -> bool {
-        self.len_inner() == 0
+    fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
-    fn is_full_inner(&self) -> bool {
-        self.capacity_inner().map(|cap| cap == self.len_inner()).unwrap_or(false)
+    fn is_full(&self) -> bool {
+        self.capacity().map(|cap| cap == self.len()).unwrap_or(false)
     }
 
-    fn len_inner(&self) -> usize {
-        match &self.chan {
-            Chan::Bounded(cap, inner) => {
-                let mut inner = inner.lock();
-                inner.pull_pending(*cap);
-                inner.queue.len()
-            },
-            Chan::Unbounded(inner) => inner.lock().queue.len(),
-        }
+    fn len(&self) -> usize {
+        let mut chan = wait_lock(&self.chan);
+        chan.pull_pending(false);
+        chan.queue.len()
     }
 
-    fn capacity_inner(&self) -> Option<usize> {
-        match &self.chan {
-            Chan::Bounded(cap, _) => Some(*cap),
-            Chan::Unbounded(_) => None,
-        }
+    fn capacity(&self) -> Option<usize> {
+        wait_lock(&self.chan).sending.as_ref().map(|(cap, _)| *cap)
     }
 }
 
@@ -521,7 +477,7 @@ impl<T> Sender<T> {
     /// receiver has been dropped, an error is returned. If the channel associated with this
     /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        self.shared.send(msg, None).map_err(|err| match err {
+        self.shared.send_sync(msg, None).map_err(|err| match err {
             TrySendTimeoutError::Full(msg) => TrySendError::Full(msg),
             TrySendTimeoutError::Disconnected(msg) => TrySendError::Disconnected(msg),
             _ => unreachable!(),
@@ -531,7 +487,7 @@ impl<T> Sender<T> {
     /// Send a value into the channel, returning an error if the channel receiver has
     /// been dropped. If the channel is bounded and is full, this method will block.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        self.shared.send(msg, Some(None)).map_err(|err| match err {
+        self.shared.send_sync(msg, Some(None)).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendError(msg),
             _ => unreachable!(),
         })
@@ -541,7 +497,7 @@ impl<T> Sender<T> {
     /// been dropped or the deadline has passed. If the channel is bounded and is full, this method
     /// will block.
     pub fn send_deadline(&self, msg: T, deadline: Instant) -> Result<(), SendTimeoutError<T>> {
-        self.shared.send(msg, Some(Some(deadline))).map_err(|err| match err {
+        self.shared.send_sync(msg, Some(Some(deadline))).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendTimeoutError::Disconnected(msg),
             TrySendTimeoutError::Timeout(msg) => SendTimeoutError::Timeout(msg),
             _ => unreachable!(),
@@ -558,23 +514,23 @@ impl<T> Sender<T> {
     /// Returns true if the channel is empty.
     /// Note: Zero-capacity channels are always empty.
     pub fn is_empty(&self) -> bool {
-        self.shared.is_empty_inner()
+        self.shared.is_empty()
     }
 
     /// Returns true if the channel is full.
     /// Note: Zero-capacity channels are always full.
     pub fn is_full(&self) -> bool {
-        self.shared.is_full_inner()
+        self.shared.is_full()
     }
 
     /// Returns the number of messages in the channel
     pub fn len(&self) -> usize {
-        self.shared.len_inner()
+        self.shared.len()
     }
 
     /// If the channel is bounded, returns its capacity.
     pub fn capacity(&self) -> Option<usize> {
-        self.shared.capacity_inner()
+        self.shared.capacity()
     }
 }
 
@@ -611,7 +567,7 @@ impl<T> Receiver<T> {
     /// Attempt to fetch an incoming value from the channel associated with this receiver,
     /// returning an error if the channel is empty or all channel senders have been dropped.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.shared.recv(None).map_err(|err| match err {
+        self.shared.recv_sync(None).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => TryRecvError::Disconnected,
             TryRecvTimeoutError::Empty => TryRecvError::Empty,
             _ => unreachable!(),
@@ -621,7 +577,7 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.shared.recv(Some(None)).map_err(|err| match err {
+        self.shared.recv_sync(Some(None)).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
             _ => unreachable!(),
         })
@@ -630,7 +586,7 @@ impl<T> Receiver<T> {
     /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all channel senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        self.shared.recv(Some(Some(deadline))).map_err(|err| match err {
+        self.shared.recv_sync(Some(Some(deadline))).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
             TryRecvTimeoutError::Timeout => RecvTimeoutError::Timeout,
             _ => unreachable!(),
@@ -659,17 +615,9 @@ impl<T> Receiver<T> {
     /// `try_iter`, the iterator will not attempt to fetch any more values from the channel once
     /// the function has been called.
     pub fn drain(&self) -> Drain<T> {
-        let queue = match &self.shared.chan {
-            // Rendezvous is suppose to be an instant handover, so it doesn't make conceptual sense
-            // for the channel to have items sitting in it
-            // Channel::Rendezvous { .. } => VecDeque::new(),
-            Chan::Bounded(cap, inner) => {
-                let mut inner = inner.lock();
-                inner.pull_pending(*cap);
-                std::mem::take(&mut inner.queue)
-            },
-            Chan::Unbounded(inner) => std::mem::take(&mut inner.lock().queue),
-        };
+        let mut chan = wait_lock(&self.shared.chan);
+        chan.pull_pending(false);
+        let queue = std::mem::take(&mut chan.queue);
 
         Drain { queue, _phantom: PhantomData }
     }
@@ -677,23 +625,23 @@ impl<T> Receiver<T> {
     /// Returns true if the channel is empty.
     /// Note: Zero-capacity channels are always empty.
     pub fn is_empty(&self) -> bool {
-        self.shared.is_empty_inner()
+        self.shared.is_empty()
     }
 
     /// Returns true if the channel is full.
     /// Note: Zero-capacity channels are always full.
     pub fn is_full(&self) -> bool {
-        self.shared.is_full_inner()
+        self.shared.is_full()
     }
 
     /// Returns the number of messages in the channel.
     pub fn len(&self) -> usize {
-        self.shared.len_inner()
+        self.shared.len()
     }
 
     /// If the channel is bounded, returns its capacity.
     pub fn capacity(&self) -> Option<usize> {
-        self.shared.capacity_inner()
+        self.shared.capacity()
     }
 }
 

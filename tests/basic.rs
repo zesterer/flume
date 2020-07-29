@@ -46,7 +46,7 @@ fn send_timeout() {
     assert!(tx.send_timeout(43, dur).is_err());
     let now = Instant::now();
 
-    let max_error = Duration::from_millis(25);
+    let max_error = Duration::from_millis(5);
     assert!(now.duration_since(then) < dur.checked_add(max_error).unwrap());
     assert!(now.duration_since(then) > dur.checked_sub(max_error).unwrap());
 
@@ -66,7 +66,7 @@ fn recv_timeout() {
     assert!(rx.recv_timeout(dur).is_err());
     let now = Instant::now();
 
-    let max_error = Duration::from_millis(1);
+    let max_error = Duration::from_millis(5);
     assert!(now.duration_since(then) < dur.checked_add(max_error).unwrap());
     assert!(now.duration_since(then) > dur.checked_sub(max_error).unwrap());
 
@@ -84,7 +84,7 @@ fn recv_deadline() {
     assert!(rx.recv_deadline(then.checked_add(dur).unwrap()).is_err());
     let now = Instant::now();
 
-    let max_error = Duration::from_millis(10);
+    let max_error = Duration::from_millis(5);
     assert!(now.duration_since(then) < dur.checked_add(max_error).unwrap());
     assert!(now.duration_since(then) > dur.checked_sub(max_error).unwrap());
 

@@ -1,9 +1,18 @@
 //! Types that permit waiting upon multiple blocking operations using the [`Selector`] interface.
 
-use crate::*;
+use crate::{*, signal::Signal};
 
 // A unique token corresponding to an event in a selector
-pub(crate) type Token = usize;
+type Token = usize;
+
+struct SelectSignal(Thread, Token, Arc<Spinlock<VecDeque<Token>>>);
+
+impl Signal for SelectSignal {
+    fn fire(&self) {
+        self.2.lock().push_back(self.1);
+        self.0.unpark();
+    }
+}
 
 /// A type used to wait upon multiple blocking operations at once.
 ///
@@ -31,7 +40,7 @@ pub struct Selector<'a, T> {
         Box<dyn FnMut() + 'a>, // Drop
     )>,
     next_poll: usize,
-    signal: Arc<Signal<Token>>,
+    signalled: Arc<Spinlock<VecDeque<Token>>>,
 }
 
 impl<'a, T> Selector<'a, T> {
@@ -40,7 +49,7 @@ impl<'a, T> Selector<'a, T> {
         Self {
             selections: Vec::new(),
             next_poll: 0,
-            signal: Arc::new(Signal::default()),
+            signalled: Arc::default(),
         }
     }
 
@@ -84,6 +93,9 @@ impl<'a, T> Selector<'a, T> {
     /// this operation.
     pub fn recv<U>(mut self, receiver: &'a Receiver<U>, mut f: impl FnMut(Result<U, RecvError>) -> T + 'a) -> Self {
         let token = self.selections.len();
+
+        self.selections.
+
         receiver.shared.connect_recv_selector(self.signal.clone(), token);
         self.selections.push((
             Box::new(move || match receiver.try_recv() {
