@@ -295,7 +295,7 @@ fn robin() {
 
 #[cfg(feature = "select")]
 #[test]
-fn select() {
+fn select_general() {
     #[derive(Debug, PartialEq)]
     struct Foo(usize);
 
@@ -304,11 +304,10 @@ fn select() {
 
     for (i, t) in vec![tx0.clone(), tx1].into_iter().enumerate() {
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(250));
             let _ = t.send(Foo(i));
         });
     }
-
 
     let x = Selector::new()
         .recv(&rx0, |x| x)

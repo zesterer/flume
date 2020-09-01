@@ -26,7 +26,7 @@ pub use select::Selector;
 
 use std::{
     collections::VecDeque,
-    sync::{self, Arc, Condvar, Mutex, MutexGuard, WaitTimeoutResult, atomic::{AtomicUsize, AtomicBool, Ordering, spin_loop_hint}},
+    sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}, Mutex, MutexGuard},
     time::{Duration, Instant},
     marker::PhantomData,
     thread,
@@ -40,9 +40,6 @@ use std::{
 
 use spinning_top::{Spinlock, SpinlockGuard};
 use crate::signal::{Signal, SyncSignal};
-
-#[cfg(feature = "select")]
-use crate::select::Token;
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -156,44 +153,60 @@ pub enum TryRecvTimeoutError {
 }
 
 // TODO: Investigate some sort of invalidation flag for timeouts
-pub struct Slot<T, S: ?Sized>(Spinlock<Option<T>>, S);
+pub struct Hook<T, S: ?Sized>(Option<Spinlock<Option<T>>>, S);
 
-impl<T, S: ?Sized + Signal> Slot<T, S> {
-    pub fn new(item: Option<T>, signal: S) -> Arc<Self> where S: Sized {
-        Arc::new(Self(Spinlock::new(item), signal))
+impl<T, S: ?Sized + Signal> Hook<T, S> {
+    pub fn slot(msg: Option<T>, signal: S) -> Arc<Self> where S: Sized {
+        Arc::new(Self(Some(Spinlock::new(msg)), signal))
+    }
+
+    pub fn trigger(signal: S) -> Arc<Self> where S: Sized {
+        Arc::new(Self(None, signal))
     }
 
     pub fn signal(&self) -> &S {
         &self.1
     }
 
-    pub fn fire_recv(&self) -> T {
-        let item = self.0.lock().take().unwrap();
+    pub fn fire_nothing(&self) {
         self.signal().fire();
-        item
     }
 
-    pub fn fire_send(&self, item: T) {
-        *self.0.lock() = Some(item);
+    pub fn fire_recv(&self) -> T {
+        let msg = self.0.as_ref().unwrap().lock().take().unwrap();
         self.signal().fire();
+        msg
+    }
+
+    pub fn fire_send(&self, msg: T) -> Option<T> {
+        let ret = match &self.0 {
+            Some(hook) => {
+                *hook.lock() = Some(msg);
+                None
+            },
+            None => Some(msg),
+        };
+        self.signal().fire();
+        ret
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.lock().is_none()
+        self.0.as_ref().map(|s| s.lock().is_none()).unwrap_or(true)
     }
 
     pub fn try_take(&self) -> Option<T> {
-        self.0.lock().take()
+        self.0.as_ref().and_then(|s| s.lock().take())
     }
 }
 
-impl<T> Slot<T, SyncSignal> {
+impl<T> Hook<T, SyncSignal> {
     pub fn wait_recv(&self, abort: &AtomicBool) -> Option<T> {
         loop {
-            let item = self.0.lock().take();
-            if let Some(item) = item {
-                break Some(item);
-            } else if abort.load(Ordering::SeqCst) {
+            let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
+            let msg = self.0.as_ref().unwrap().lock().take();
+            if let Some(msg) = msg {
+                break Some(msg);
+            } else if disconnected {
                 break None;
             } else {
                 self.signal().wait()
@@ -204,10 +217,11 @@ impl<T> Slot<T, SyncSignal> {
     // Err(true) if timeout
     pub fn wait_deadline_recv(&self, abort: &AtomicBool, deadline: Instant) -> Result<T, bool> {
         loop {
-            let item = self.0.lock().take();
-            if let Some(item) = item {
-                break Ok(item);
-            } else if abort.load(Ordering::SeqCst) {
+            let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
+            let msg = self.0.as_ref().unwrap().lock().take();
+            if let Some(msg) = msg {
+                break Ok(msg);
+            } else if disconnected {
                 break Err(false);
             } else if let Some(dur) = deadline.checked_duration_since(Instant::now()) {
                 self.signal().wait_timeout(dur);
@@ -219,9 +233,10 @@ impl<T> Slot<T, SyncSignal> {
 
     pub fn wait_send(&self, abort: &AtomicBool) {
         loop {
-            if self.0.lock().is_none() {
+            let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
+            if self.0.as_ref().unwrap().lock().is_none() {
                 break;
-            } else if abort.load(Ordering::SeqCst) {
+            } else if disconnected {
                 break;
             }
 
@@ -232,9 +247,10 @@ impl<T> Slot<T, SyncSignal> {
     // Err(true) if timeout
     pub fn wait_deadline_send(&self, abort: &AtomicBool, deadline: Instant) -> Result<(), bool> {
         loop {
-            if self.0.lock().is_none() {
+            let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
+            if self.0.as_ref().unwrap().lock().is_none() {
                 break Ok(());
-            } else if abort.load(Ordering::SeqCst) {
+            } else if disconnected {
                 break Err(false);
             } else if let Some(dur) = deadline.checked_duration_since(Instant::now()) {
                 self.signal().wait_timeout(dur);
@@ -248,29 +264,34 @@ impl<T> Slot<T, SyncSignal> {
 #[inline]
 #[cfg(not(windows))]
 fn wait_lock<'a, T>(lock: &'a Spinlock<T>) -> SpinlockGuard<'a, T> {
-    let mut i = 0;
+    let mut i = 4;
     loop {
-        for _ in 0..5 {
+        for _ in 0..10 {
             if let Some(guard) = lock.try_lock() {
                 return guard;
             }
             thread::yield_now();
         }
-        thread::sleep(Duration::from_nanos(i * 50));
+        thread::sleep(Duration::from_nanos(1 << i));
         i += 1;
     }
 }
 
-// #[inline]
-// #[cfg(windows)]
-// fn wait_lock<'a, T>(lock: &'a InnerMutex<T>) -> InnerMutexGuard<'a, T> {
-//     lock.lock().unwrap()
-// }
+#[inline]
+#[cfg(windows)]
+fn wait_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
+    lock.lock().unwrap()
+}
+
+#[cfg(not(windows))]
+pub type ChanLock<T> = Spinlock<T>;
+#[cfg(windows)]
+pub type ChanLock<T> = Mutex<T>;
 
 struct Chan<T> {
-    sending: Option<(usize, VecDeque<Arc<Slot<T, dyn signal::Signal>>>)>,
+    sending: Option<(usize, VecDeque<Arc<Hook<T, dyn signal::Signal>>>)>,
     queue: VecDeque<T>,
-    waiting: VecDeque<Arc<Slot<T, dyn signal::Signal>>>,
+    waiting: VecDeque<Arc<Hook<T, dyn signal::Signal>>>,
 }
 
 impl<T> Chan<T> {
@@ -287,16 +308,16 @@ impl<T> Chan<T> {
             }
         }
     }
-}
 
-enum Block {
-    None,
-    Until(Instant),
-    Forever,
+    fn try_wake_one_receiver(&mut self) {
+        self.waiting
+            .pop_front()
+            .map(|s| s.fire_nothing());
+    }
 }
 
 struct Shared<T> {
-    chan: Spinlock<Chan<T>>,
+    chan: ChanLock<Chan<T>>,
     disconnected: AtomicBool,
     sender_count: AtomicUsize,
     receiver_count: AtomicUsize,
@@ -305,7 +326,7 @@ struct Shared<T> {
 impl<T> Shared<T> {
     fn new(cap: Option<usize>) -> Self {
         Self {
-            chan: Spinlock::new(Chan {
+            chan: ChanLock::new(Chan {
                 sending: cap.map(|cap| (cap, VecDeque::new())),
                 queue: VecDeque::new(),
                 waiting: VecDeque::new(),
@@ -318,67 +339,67 @@ impl<T> Shared<T> {
 
     fn send<S: Signal, R: From<Result<(), TrySendTimeoutError<T>>>>(
         &self,
-        item: T,
+        msg: T,
         should_block: bool,
-        make_signal: impl FnOnce() -> S,
-        do_block: impl FnOnce(Arc<Slot<T, S>>) -> R,
+        make_signal: impl FnOnce(T) -> Arc<Hook<T, S>>,
+        do_block: impl FnOnce(Arc<Hook<T, S>>) -> R,
     ) -> R {
         let mut chan = wait_lock(&self.chan);
 
         if self.is_disconnected() {
-            Err(TrySendTimeoutError::Disconnected(item)).into()
+            Err(TrySendTimeoutError::Disconnected(msg)).into()
         } else if let Some(r) = chan.waiting.pop_front() {
             debug_assert!(chan.queue.len() == 0);
-            r.fire_send(item);
+            if let Some(msg) = r.fire_send(msg) {
+                chan.queue.push_back(msg);
+            }
             Ok(()).into()
         } else if chan.sending.as_ref().map(|(cap, _)| chan.queue.len() < *cap).unwrap_or(true) {
-            chan.queue.push_back(item);
+            chan.queue.push_back(msg);
             Ok(()).into()
         } else if should_block { // Only bounded from here on
-            let slot = Slot::new(Some(item), make_signal());
-            chan.sending.as_mut().unwrap().1.push_back(slot.clone());
+            let hook = make_signal(msg);
+            chan.sending.as_mut().unwrap().1.push_back(hook.clone());
             drop(chan);
 
-            do_block(slot)
+            do_block(hook)
         } else {
-            Err(TrySendTimeoutError::Full(item)).into()
+            Err(TrySendTimeoutError::Full(msg)).into()
         }
     }
 
     fn send_sync(
         &self,
-        item: T,
+        msg: T,
         block: Option<Option<Instant>>,
     ) -> Result<(), TrySendTimeoutError<T>> {
         self.send(
-            // item
-            item,
+            // msg
+            msg,
             // should_block
             block.is_some(),
             // make_signal
-            || SyncSignal::default(),
+            |msg| Hook::slot(Some(msg), SyncSignal::default()),
             // do_block
-            |slot| if let Some(deadline) = block.unwrap() {
-                slot.wait_deadline_send(&self.disconnected, deadline)
+            |hook| if let Some(deadline) = block.unwrap() {
+                hook.wait_deadline_send(&self.disconnected, deadline)
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
-                            let slot: Arc<Slot<T, dyn signal::Signal>> = slot.clone();
-                            wait_lock(&self.chan).sending.as_mut().unwrap().1.retain(|s| !Arc::ptr_eq(s, &slot));
+                            let hook: Arc<Hook<T, dyn signal::Signal>> = hook.clone();
+                            wait_lock(&self.chan).sending.as_mut().unwrap().1.retain(|s| !Arc::ptr_eq(s, &hook));
                         }
-                        let item = slot.0.lock().take();
-                        item.map(|item| if self.is_disconnected() {
-                            Err(TrySendTimeoutError::Disconnected(item))
+                        hook.try_take().map(|msg| if self.is_disconnected() {
+                            Err(TrySendTimeoutError::Disconnected(msg))
                         } else {
-                            Err(TrySendTimeoutError::Timeout(item))
+                            Err(TrySendTimeoutError::Timeout(msg))
                         })
                         .unwrap_or(Ok(()))
                     })
             } else {
-                slot.wait_send(&self.disconnected);
+                hook.wait_send(&self.disconnected);
 
-                let item = slot.0.lock().take();
-                match item {
-                    Some(item) => Err(TrySendTimeoutError::Disconnected(item)),
+                match hook.try_take() {
+                    Some(msg) => Err(TrySendTimeoutError::Disconnected(msg)),
                     None => Ok(()),
                 }
             },
@@ -388,22 +409,22 @@ impl<T> Shared<T> {
     fn recv<S: Signal, R: From<Result<T, TryRecvTimeoutError>>>(
         &self,
         should_block: bool,
-        make_signal: impl FnOnce() -> S,
-        do_block: impl FnOnce(Arc<Slot<T, S>>) -> R,
+        make_signal: impl FnOnce() -> Arc<Hook<T, S>>,
+        do_block: impl FnOnce(Arc<Hook<T, S>>) -> R,
     ) -> R {
         let mut chan = wait_lock(&self.chan);
         chan.pull_pending(true);
 
-        if let Some(item) = chan.queue.pop_front() {
-            Ok(item).into()
+        if let Some(msg) = chan.queue.pop_front() {
+            Ok(msg).into()
         } else if self.is_disconnected() {
             Err(TryRecvTimeoutError::Disconnected).into()
         } else if should_block {
-            let slot = Slot::new(None, make_signal());
-            chan.waiting.push_back(slot.clone());
+            let hook = make_signal();
+            chan.waiting.push_back(hook.clone());
             drop(chan);
 
-            do_block(slot)
+            do_block(hook)
         } else {
             Err(TryRecvTimeoutError::Empty).into()
         }
@@ -414,38 +435,46 @@ impl<T> Shared<T> {
             // should_block
             block.is_some(),
             // make_signal
-            || SyncSignal::default(),
+            || Hook::slot(None, SyncSignal::default()),
             // do_block
-            |slot| if let Some(deadline) = block.unwrap() {
-                slot.wait_deadline_recv(&self.disconnected, deadline)
+            |hook| if let Some(deadline) = block.unwrap() {
+                hook.wait_deadline_recv(&self.disconnected, deadline)
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
-                            let slot: Arc<Slot<T, dyn Signal>> = slot.clone();
-                            wait_lock(&self.chan).waiting.retain(|s| !Arc::ptr_eq(s, &slot));
+                            let hook: Arc<Hook<T, dyn Signal>> = hook.clone();
+                            wait_lock(&self.chan).waiting.retain(|s| !Arc::ptr_eq(s, &hook));
                         }
-                        let item = slot.0.lock().take();
-                        item.ok_or_else(|| if self.is_disconnected() {
-                            TryRecvTimeoutError::Disconnected
-                        } else {
-                            TryRecvTimeoutError::Timeout
-                        })
+                        match hook.try_take() {
+                            Some(msg) => Ok(msg),
+                            None => {
+                                let disconnected = self.is_disconnected(); // Check disconnect *before* msg
+                                if let Some(msg) = wait_lock(&self.chan).queue.pop_front() {
+                                    Ok(msg)
+                                } else if disconnected {
+                                    Err(TryRecvTimeoutError::Disconnected)
+                                } else {
+                                    Err(TryRecvTimeoutError::Timeout)
+                                }
+                            },
+                        }
                     })
             } else {
-                slot.wait_recv(&self.disconnected)
+                hook.wait_recv(&self.disconnected)
+                    .or_else(|| wait_lock(&self.chan).queue.pop_front())
                     .ok_or(TryRecvTimeoutError::Disconnected)
             },
         )
     }
 
     /// Disconnect anything listening on this channel (this will not prevent receivers receiving
-    /// items that have already been sent)
+    /// msgs that have already been sent)
     fn disconnect_all(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
 
         let mut chan = wait_lock(&self.chan);
         chan.pull_pending(false);
-        chan.sending.as_ref().map(|(_, sending)| sending.iter().for_each(|slot| slot.signal().fire()));
-        chan.waiting.iter().for_each(|slot| slot.signal().fire());
+        chan.sending.as_ref().map(|(_, sending)| sending.iter().for_each(|hook| hook.signal().fire()));
+        chan.waiting.iter().for_each(|hook| hook.signal().fire());
     }
 
     fn is_disconnected(&self) -> bool {
@@ -513,6 +542,11 @@ impl<T> Sender<T> {
     /// will block.
     pub fn send_timeout(&self, msg: T, dur: Duration) -> Result<(), SendTimeoutError<T>> {
         self.send_deadline(msg, Instant::now().checked_add(dur).unwrap())
+    }
+
+    /// Returns true if all receivers for this channel have been dropped.
+    pub fn is_disconnected(&self) -> bool {
+        self.shared.is_disconnected()
     }
 
     /// Returns true if the channel is empty.
@@ -615,7 +649,7 @@ impl<T> Receiver<T> {
         TryIter { receiver: &self }
     }
 
-    /// Take all items currently sitting in the channel and produce an iterator over them. Unlike
+    /// Take all msgs currently sitting in the channel and produce an iterator over them. Unlike
     /// `try_iter`, the iterator will not attempt to fetch any more values from the channel once
     /// the function has been called.
     pub fn drain(&self) -> Drain<T> {
@@ -624,6 +658,11 @@ impl<T> Receiver<T> {
         let queue = std::mem::take(&mut chan.queue);
 
         Drain { queue, _phantom: PhantomData }
+    }
+
+    /// Returns true if all senders for this channel have been dropped.
+    pub fn is_disconnected(&self) -> bool {
+        self.shared.is_disconnected()
     }
 
     /// Returns true if the channel is empty.
@@ -693,7 +732,7 @@ impl<T> IntoIterator for Receiver<T> {
     }
 }
 
-/// An iterator over the items received from a channel.
+/// An iterator over the msgs received from a channel.
 pub struct Iter<'a, T> {
     receiver: &'a Receiver<T>,
 }
@@ -706,7 +745,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
     }
 }
 
-/// An non-blocking iterator over the items received from a channel.
+/// An non-blocking iterator over the msgs received from a channel.
 pub struct TryIter<'a, T> {
     receiver: &'a Receiver<T>,
 }
@@ -719,7 +758,7 @@ impl<'a, T> Iterator for TryIter<'a, T> {
     }
 }
 
-/// An fixed-sized iterator over the items drained from a channel.
+/// An fixed-sized iterator over the msgs drained from a channel.
 #[derive(Debug)]
 pub struct Drain<'a, T> {
     queue: VecDeque<T>,
@@ -743,7 +782,7 @@ impl<'a, T> ExactSizeIterator for Drain<'a, T> {
     }
 }
 
-/// An owned iterator over the items received from a channel.
+/// An owned iterator over the msgs received from a channel.
 pub struct IntoIter<T> {
     receiver: Receiver<T>,
 }
