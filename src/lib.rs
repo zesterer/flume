@@ -1,4 +1,4 @@
-//! # Flume
+#![feature(weak_into_raw)]//! # Flume
 //!
 //! A blazingly fast multi-producer, single-consumer channel.
 //!
@@ -309,10 +309,12 @@ impl<T> Chan<T> {
         }
     }
 
-    fn try_wake_one_receiver(&mut self) {
-        self.waiting
-            .pop_front()
-            .map(|s| s.fire_nothing());
+    fn try_wake_receiver_if_pending(&mut self) {
+        if self.queue.len() > 0 {
+            self.waiting
+                .pop_front()
+                .map(|s| s.fire_nothing());
+        }
     }
 }
 
@@ -386,7 +388,7 @@ impl<T> Shared<T> {
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
                             let hook: Arc<Hook<T, dyn signal::Signal>> = hook.clone();
-                            wait_lock(&self.chan).sending.as_mut().unwrap().1.retain(|s| !Arc::ptr_eq(s, &hook));
+                            wait_lock(&self.chan).sending.as_mut().unwrap().1.retain(|s| Arc::as_ptr(s) as *const () != Arc::as_ptr(&hook) as *const ());
                         }
                         hook.try_take().map(|msg| if self.is_disconnected() {
                             Err(TrySendTimeoutError::Disconnected(msg))
@@ -442,7 +444,7 @@ impl<T> Shared<T> {
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
                             let hook: Arc<Hook<T, dyn Signal>> = hook.clone();
-                            wait_lock(&self.chan).waiting.retain(|s| !Arc::ptr_eq(s, &hook));
+                            wait_lock(&self.chan).waiting.retain(|s| Arc::as_ptr(s) as *const () != Arc::as_ptr(&hook) as *const ());
                         }
                         match hook.try_take() {
                             Some(msg) => Ok(msg),

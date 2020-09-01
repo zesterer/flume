@@ -76,6 +76,10 @@ fn r#async_recv_drop_recv() {
 
     let recv_fut = rx.recv_async();
 
+    async_std::task::block_on(async {
+        let _ = async_std::future::timeout(std::time::Duration::from_millis(500), rx.recv_async()).await;
+    });
+
     let rx2 = rx.clone();
     let t = std::thread::spawn(move || {
         async_std::task::block_on(async {

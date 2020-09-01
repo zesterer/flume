@@ -206,7 +206,7 @@ impl<'a, T> Selector<'a, T> {
                     wait_lock(&self.receiver.shared.chan).waiting.retain(|s| !Arc::ptr_eq(s, &hook));
                     // If we were woken, but never polled, wake up another
                     if !self.received && hook.signal().as_any().downcast_ref::<SelectSignal>().unwrap().2.load(Ordering::SeqCst) {
-                        wait_lock(&self.receiver.shared.chan).try_wake_one_receiver();
+                        wait_lock(&self.receiver.shared.chan).try_wake_receiver_if_pending();
                     }
                 }
             }

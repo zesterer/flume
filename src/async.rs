@@ -165,11 +165,11 @@ impl<'a, T> Drop for RecvFut<'a, T> {
         if let Some(hook) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
             let mut chan = wait_lock(&self.shared.chan);
-            chan.waiting.retain(|s| !Arc::ptr_eq(s, &hook));
+            chan.waiting.retain(|s| Arc::as_ptr(s) as *const () != Arc::as_ptr(&hook) as *const ());
             if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().1.load(Ordering::SeqCst) {
                 // If this signal has been fired, but we're being dropped (and so not listening to it),
                 // pass the signal on to another receiver
-                chan.try_wake_one_receiver();
+                chan.try_wake_receiver_if_pending();
             }
         }
     }
