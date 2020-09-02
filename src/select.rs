@@ -285,7 +285,7 @@ impl<'a, T> Selector<'a, T> {
     /// Poll each event associated with this [`Selector`] to see whether any have completed. If
     /// more than one event has completed, a random event handler will be run and its return value
     /// returned. If none of the events have completed a `None` is returned.
-    pub fn poll(&mut self) -> Option<T> {
+    fn poll(&mut self) -> Option<T> {
         for _ in 0..self.selections.len() {
             if let Some(val) = self.selections[self.next_poll].poll() {
                 return Some(val);
