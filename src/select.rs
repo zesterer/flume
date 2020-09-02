@@ -226,13 +226,20 @@ impl<'a, T> Selector<'a, T> {
         self
     }
 
-    fn wait_inner(&mut self, deadline: Option<Instant>) -> Option<T> {
+    fn wait_inner(mut self, deadline: Option<Instant>) -> Option<T> {
+        #[cfg(feature = "eventual-fairness")]
+        {
+            use rand::prelude::*;
+            self.next_poll = thread_rng().gen_range(0, self.selections.len());
+        }
+
         let res = 'outer: loop {
             // Init signals
-            for s in &mut self.selections {
-                if let Some(msg) = s.init() {
-                    break 'outer Some(msg);
+            for _ in 0..self.selections.len() {
+                if let Some(val) = self.selections[self.next_poll].init() {
+                    break 'outer Some(val);
                 }
+                self.next_poll = (self.next_poll + 1) % self.selections.len();
             }
 
             // Speculatively poll
@@ -290,14 +297,14 @@ impl<'a, T> Selector<'a, T> {
 
     /// Wait until one of the events associated with this [`Selector`] has completed. If more than
     /// one event has completed, a random event handler will be run and its return value produced.
-    pub fn wait(mut self) -> T {
+    pub fn wait(self) -> T {
         self.wait_inner(None).unwrap()
     }
 
     /// Wait until one of the events associated with this [`Selector`] has completed or the timeout
     /// has been reached. If more than one event has completed, a random event handler will be run
     /// and its return value produced.
-    pub fn wait_timeout(mut self, dur: Duration) -> T {
+    pub fn wait_timeout(self, dur: Duration) -> T {
         self.wait_inner(Some(Instant::now() + dur)).unwrap()
     }
 

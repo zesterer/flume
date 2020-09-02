@@ -179,7 +179,7 @@ impl<'a, T> Future for RecvFut<'a, T> {
     type Output = Result<T, RecvError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(hook) = self.hook.as_ref() {
+        if self.hook.is_some() {
             if let Ok(msg) = self.shared.recv_sync(None) {
                 Poll::Ready(Ok(msg))
             } else if self.shared.is_disconnected() {

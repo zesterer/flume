@@ -14,11 +14,13 @@ exclude = ["misc"]
 [features]
 select = []
 async = ["futures"]
-default = ["select", "async"]
+eventual-fairness = ["async", "rand"]
+default = ["async", "select", "eventual-fairness"]
 
 [dependencies]
 spinning_top = "0.2"
 futures = { version = "^0.3", default-features = false, optional = true }
+rand = { version = "0.7", optional = true }
 
 [dev-dependencies]
 crossbeam-channel = "0.4"
