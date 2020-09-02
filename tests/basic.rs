@@ -36,6 +36,28 @@ fn iter_threaded() {
 }
 
 #[test]
+fn send_timeout() {
+    let (tx, rx) = bounded(1);
+
+    assert!(tx.send_timeout(42, Duration::from_millis(350)).is_ok());
+
+    let dur = Duration::from_millis(350);
+    let then = Instant::now();
+    assert!(tx.send_timeout(43, dur).is_err());
+    let now = Instant::now();
+
+    let max_error = Duration::from_millis(5);
+    assert!(now.duration_since(then) < dur.checked_add(max_error).unwrap());
+    assert!(now.duration_since(then) > dur.checked_sub(max_error).unwrap());
+
+    assert_eq!(rx.drain().count(), 1);
+
+    drop(rx);
+
+    assert!(tx.send_timeout(42, Duration::from_millis(350)).is_err());
+}
+
+#[test]
 fn recv_timeout() {
     let (tx, rx) = unbounded();
 
@@ -44,7 +66,7 @@ fn recv_timeout() {
     assert!(rx.recv_timeout(dur).is_err());
     let now = Instant::now();
 
-    let max_error = Duration::from_millis(1);
+    let max_error = Duration::from_millis(5);
     assert!(now.duration_since(then) < dur.checked_add(max_error).unwrap());
     assert!(now.duration_since(then) > dur.checked_sub(max_error).unwrap());
 
@@ -62,13 +84,24 @@ fn recv_deadline() {
     assert!(rx.recv_deadline(then.checked_add(dur).unwrap()).is_err());
     let now = Instant::now();
 
-    let max_error = Duration::from_millis(10);
+    let max_error = Duration::from_millis(5);
     assert!(now.duration_since(then) < dur.checked_add(max_error).unwrap());
     assert!(now.duration_since(then) > dur.checked_sub(max_error).unwrap());
 
     tx.send(42).unwrap();
     assert_eq!(rx.recv_deadline(now.checked_add(dur).unwrap()), Ok(42));
     assert!(Instant::now().duration_since(now) < max_error);
+}
+
+#[test]
+fn recv_timeout_missed_send() {
+    let (tx, rx) = bounded(10);
+
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+
+    tx.send(42).unwrap();
+
+    assert_eq!(rx.recv(), Ok(42));
 }
 
 #[test]
@@ -262,7 +295,7 @@ fn robin() {
 
 #[cfg(feature = "select")]
 #[test]
-fn select() {
+fn select_general() {
     #[derive(Debug, PartialEq)]
     struct Foo(usize);
 
@@ -271,11 +304,10 @@ fn select() {
 
     for (i, t) in vec![tx0.clone(), tx1].into_iter().enumerate() {
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(250));
             let _ = t.send(Foo(i));
         });
     }
-
 
     let x = Selector::new()
         .recv(&rx0, |x| x)

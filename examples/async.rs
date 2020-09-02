@@ -16,3 +16,6 @@ async fn main() {
 
     t.await;
 }
+
+#[cfg(not(feature = "async"))]
+fn main () {}

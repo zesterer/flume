@@ -9,20 +9,24 @@ keywords = ["mpsc", "fifo", "channel", "thread", "fast"]
 categories = ["concurrency", "data-structures"]
 license = "Apache-2.0/MIT"
 readme = "README.md"
+exclude = ["misc"]
 
 [features]
 select = []
 async = ["futures"]
-default = ["select", "async"]
+eventual-fairness = ["async", "rand"]
+default = ["async", "select", "eventual-fairness"]
 
 [dependencies]
-spin = "0.5"
+spinning_top = "0.2"
 futures = { version = "^0.3", default-features = false, optional = true }
+rand = { version = "0.7", optional = true }
 
 [dev-dependencies]
 crossbeam-channel = "0.4"
 crossbeam-utils = "0.7"
 criterion = "0.3.1"
+rand = "0.7"
 async-std = { version = "1.5", features = ["attributes"] }
 
 [[bench]]

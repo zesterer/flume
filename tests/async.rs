@@ -1,8 +1,9 @@
+#[cfg(feature = "async")]
 use flume::*;
 
 #[cfg(feature = "async")]
 #[test]
-fn r#async() {
+fn r#async_recv() {
     let (tx, mut rx) = unbounded();
 
     let t = std::thread::spawn(move || {
@@ -15,6 +16,84 @@ fn r#async() {
     });
 
     t.join().unwrap();
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn r#async_send() {
+    let (tx, mut rx) = bounded(1);
+
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert_eq!(rx.recv(), Ok(42));
+    });
+
+    async_std::task::block_on(async {
+        tx.send_async(42u32).await.unwrap();
+    });
+
+    t.join().unwrap();
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn r#async_recv_disconnect() {
+    let (tx, mut rx) = bounded::<i32>(0);
+
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        drop(tx)
+    });
+
+    async_std::task::block_on(async {
+        assert_eq!(rx.recv_async().await, Err(RecvError::Disconnected));
+    });
+
+    t.join().unwrap();
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn r#async_send_disconnect() {
+    let (tx, mut rx) = bounded(0);
+
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        drop(rx)
+    });
+
+    async_std::task::block_on(async {
+        assert_eq!(tx.send_async(42u32).await, Err(SendError(42)));
+    });
+
+    t.join().unwrap();
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn r#async_recv_drop_recv() {
+    let (tx, mut rx) = bounded::<i32>(10);
+
+    let recv_fut = rx.recv_async();
+
+    async_std::task::block_on(async {
+        let _ = async_std::future::timeout(std::time::Duration::from_millis(500), rx.recv_async()).await;
+    });
+
+    let rx2 = rx.clone();
+    let t = std::thread::spawn(move || {
+        async_std::task::block_on(async {
+            rx2.recv_async().await
+        })
+    });
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    tx.send(42).unwrap();
+
+    drop(recv_fut);
+
+    assert_eq!(t.join().unwrap(), Ok(42))
 }
 
 #[cfg(feature = "async")]

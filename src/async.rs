@@ -3,270 +3,237 @@
 use std::{
     future::Future,
     pin::Pin,
-    task::{Context, Poll},
-    fmt,
+    task::{Context, Poll, Waker},
+    any::Any,
 };
 use crate::*;
 use futures::{Stream, stream::FusedStream, future::FusedFuture, Sink};
 
-impl<T> Receiver<T> {
-    #[inline]
-    fn poll(&self, cx: &mut Context<'_>) -> Poll<Result<T, RecvError>> {
-        let mut buf = self.buffer.borrow_mut();
+struct AsyncSignal(Waker, AtomicBool);
 
-        let res = if let Some(msg) = buf.pop_front() {
-            return Poll::Ready(Ok(msg)); // Avoid the need to lock the inner
-        } else {
-            self
-                .shared
-                .poll_inner()
-                .map(|mut inner| self
-                    .shared
-                    .try_recv(
-                        move || {
-                            // Detach the waker
-                            inner.recv_waker = None;
-                            // Inform the sender that we no longer need waking
-                            inner.listen_mode = 1;
-                            inner
-                        },
-                        &mut buf,
-                        &self.finished,
-                    )
-                )
-        };
+impl Signal for AsyncSignal {
+    fn as_any(&self) -> &(dyn Any + 'static) { self }
 
-        let poll = match res {
-            Some(Ok(msg)) => Poll::Ready(Ok(msg)),
-            Some(Err((_, TryRecvError::Disconnected))) => Poll::Ready(Err(RecvError::Disconnected)),
-            Some(Err((mut inner, TryRecvError::Empty))) => {
-                // Inform the sender that we need waking
-                inner.recv_waker = Some(cx.waker().clone());
-                inner.listen_mode = 2;
-                Poll::Pending
-            },
-            // Can't access the inner lock, try again
-            None => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            },
-        };
-
-        poll
+    fn fire(&self) {
+        self.1.store(true, Ordering::SeqCst);
+        self.0.wake_by_ref()
     }
 }
 
-/// A future  used to receive a value from the channel.
-pub struct RecvFuture<'a, T> {
-    recv: &'a mut Receiver<T>,
-}
+// TODO: Wtf happens with timeout races? Futures can still receive items when not being actively polled...
+// Is this okay? I guess it must be? How do other async channel crates handle it?
 
-impl<'a, T> RecvFuture<'a, T> {
-    pub(crate) fn new(recv: &mut Receiver<T>) -> RecvFuture<T> {
-        RecvFuture { recv }
-    }
-}
-
-impl<'a, T> Future for RecvFuture<'a, T> {
-    type Output = Result<T, RecvError>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.recv.poll(cx)
-    }
-}
-
-impl<'a, T> FusedFuture for RecvFuture<'a, T> {
-    fn is_terminated(&self) -> bool {
-        self.recv.finished.get()
-    }
-}
-
-enum PollSendError<T> {
-    Full(T),
-    Disconnected(T),
-    CouldNotLock(T),
-}
-
-impl<T> PollSendError<T> {
-    fn into_message(self) -> T {
-        match self {
-            PollSendError::Full(m) => m,
-            PollSendError::Disconnected(m) => m,
-            PollSendError::CouldNotLock(m) => m,
+impl<T: Unpin> Sender<T> {
+    /// Asynchronously send a value into the channel, returning an error if the channel receiver has
+    /// been dropped. If the channel is bounded and is full, this method will yield to the async runtime.
+    pub fn send_async(&self, item: T) -> SendFuture<T> {
+        SendFuture {
+            shared: &self.shared,
+            hook: Some(Err(item)),
         }
     }
+
+    /// Use this channel as an asynchronous item sink.
+    pub fn sink(&self) -> SendSink<T> {
+        SendSink(SendFuture {
+            shared: &self.shared,
+            hook: None,
+        })
+    }
 }
 
-impl<T> Sender<T> {
-    pub fn sink(&self) -> SenderSink<T> {
-        SenderSink::new(self)
-    }
+pub struct SendFuture<'a, T: Unpin> {
+    shared: &'a Shared<T>,
+    // Only none after dropping
+    hook: Option<Result<Arc<Hook<T, AsyncSignal>>, T>>,
+}
 
-    #[inline]
-    fn poll(&self, msg: T, cx: &mut Context<'_>) -> Result<(), PollSendError<T>> {
-        let mut inner = match self.shared.poll_inner() {
-            Some(inner) => inner,
-            None => {
-                cx.waker().wake_by_ref();
-                return Err(PollSendError::CouldNotLock(msg));
-            },
-        };
-
-        if inner.listen_mode == 0 {
-            // If the listener has disconnected, the channel is dead
-            return Err(PollSendError::Disconnected(msg));
+impl<'a, T: Unpin> Drop for SendFuture<'a, T> {
+    fn drop(&mut self) {
+        if let Some(Ok(hook)) = self.hook.take() {
+            let hook: Arc<Hook<T, dyn Signal>> = hook;
+            wait_lock(&self.shared.chan).sending
+                .as_mut()
+                .unwrap().1
+                .retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
         }
-        // If pushing fails, it's because the queue is full
-        match inner.queue.push(msg) {
-            Err(msg) => {
-                // Let the receiver know that we need to be woken
-                inner.send_wakers.push_back(cx.waker().clone());
-                return Err(PollSendError::Full(msg))
-            },
-            Ok(()) => {},
-        };
-
-        self.shared.send_notify(inner);
-        Ok(())
-    }
-}
-
-impl<T> Stream for Receiver<T> {
-    type Item = T;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.poll(cx).map(|ready| ready.ok())
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.buffer.borrow().len(), None)
-    }
-}
-
-impl<T> FusedStream for Receiver<T> {
-    fn is_terminated(&self) -> bool {
-        self.finished.get()
-    }
-}
-
-/// Error returned when a send future or sink linked to a disconnected sender is polled. To retrieve
-/// the associated message, call the `into_message` method of the `SendFuture` or `into_pending`
-/// method of the `SinkSender`.
-#[derive(Debug)]
-pub struct Disconnected;
-
-impl fmt::Display for Disconnected {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        "sending on a disconnected channel".fmt(f)
-    }
-}
-
-impl std::error::Error for Disconnected {}
-
-pub struct SendFuture<'a, T> {
-    send: &'a Sender<T>,
-    msg: Option<T>,
-}
-
-impl<'a, T> SendFuture<'a, T> {
-    pub(crate) fn new(send: &Sender<T>, msg: T) -> SendFuture<T> {
-        SendFuture { send, msg: Some(msg) }
-    }
-}
-
-impl<'a, T> SendFuture<'a, T> {
-    pub fn into_message(self) -> Option<T> {
-        self.msg
     }
 }
 
 impl<'a, T: Unpin> Future for SendFuture<'a, T> {
-    type Output = Result<(), Disconnected>;
+    type Output = Result<(), SendError<T>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.msg.take() {
-            Some(msg) => match self.send.poll(msg, cx) {
-                Ok(()) => Poll::Ready(Ok(())),
-                Err(PollSendError::Disconnected(m)) => {
-                    self.msg.replace( m);
-                    Poll::Ready(Err(Disconnected))
+        if let Some(Ok(hook)) = self.hook.as_ref() {
+            return if hook.is_empty() {
+                Poll::Ready(Ok(()))
+            } else if self.shared.is_disconnected() {
+                match self.hook.take().unwrap() {
+                    Err(item) => Poll::Ready(Err(SendError(item))),
+                    Ok(hook) => match hook.try_take() {
+                        Some(item) => Poll::Ready(Err(SendError(item))),
+                        None => Poll::Ready(Ok(())),
+                    },
+                }
+            } else {
+                Poll::Pending
+            };
+        } else {
+            self.shared.send(
+                // item
+                match self.hook.take().unwrap() {
+                    Err(item) => item,
+                    Ok(_) => return Poll::Ready(Ok(())),
                 },
-                Err(e) => { // Need to wait a bit... poll will be rescheduled by `send.poll`
-                    self.msg.replace(e.into_message());
+                // should_block
+                true,
+                // make_signal
+                |msg| Hook::slot(Some(msg), AsyncSignal(cx.waker().clone(), AtomicBool::new(false))),
+                // do_block
+                |hook| {
+                    self.hook = Some(Ok(hook));
                     Poll::Pending
-                },
-            },
-            None => Poll::Pending,
+                }
+            )
+                .map(|r| r.map_err(|err| match err {
+                    TrySendTimeoutError::Disconnected(msg) => SendError(msg),
+                    _ => unreachable!(),
+                }))
         }
     }
 }
 
 impl<'a, T: Unpin> FusedFuture for SendFuture<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.send.disconnected.get()
+        self.shared.is_disconnected()
     }
 }
 
-pub struct SenderSink<'a, T> {
-    buf: VecDeque<T>,
-    send: &'a Sender<T>,
-}
+pub struct SendSink<'a, T: Unpin>(SendFuture<'a, T>);
 
-impl<'a, T> SenderSink<'a, T> {
-    fn new(send: &'a Sender<T>) -> Self {
-        SenderSink {
-            buf: VecDeque::new(),
-            send,
-        }
-    }
+impl<'a, T: Unpin> Sink<T> for SendSink<'a, T> {
+    type Error = SendError<T>;
 
-    pub fn into_pending(self) -> Vec<T> {
-        self.buf.into()
-    }
-}
-
-impl<'a, T: Unpin> Sink<T> for SenderSink<'a, T> {
-    type Error = Disconnected;
-
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if !self.send.disconnected.get() {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Ready(Err(Disconnected))
-        }
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.0).poll(cx)
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        if !self.send.disconnected.get() {
-            self.buf.push_back(item);
-            Ok(())
+        self.0 = SendFuture {
+            shared: &self.0.shared,
+            hook: Some(Err(item)),
+        };
+
+        Ok(())
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.0).poll(cx) // TODO: A different strategy here?
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.0).poll(cx) // TODO: A different strategy here?
+    }
+}
+
+impl<T> Receiver<T> {
+    /// Asynchronously wait for an incoming value from the channel associated with this receiver,
+    /// returning an error if all channel senders have been dropped.
+    pub fn recv_async(&self) -> impl Future<Output=Result<T, RecvError>> + '_ {
+        RecvFut::new(&self.shared)
+    }
+
+    /// Use this channel as an asynchronous stream of items.
+    pub fn stream(&self) -> impl Stream<Item=T> + '_ {
+        RecvFut::new(&self.shared)
+    }
+}
+
+struct RecvFut<'a, T> {
+    shared: &'a Shared<T>,
+    hook: Option<Arc<Hook<T, AsyncSignal>>>,
+}
+
+impl<'a, T> RecvFut<'a, T> {
+    fn new(shared: &'a Shared<T>) -> Self {
+        Self {
+            shared,
+            hook: None,
+        }
+    }
+}
+
+impl<'a, T> Drop for RecvFut<'a, T> {
+    fn drop(&mut self) {
+        if let Some(hook) = self.hook.take() {
+            let hook: Arc<Hook<T, dyn Signal>> = hook;
+            let mut chan = wait_lock(&self.shared.chan);
+            // We'd like to use `Arc::ptr_eq` here but it doesn't seem to work consistently with wide pointers?
+            chan.waiting.retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
+            if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().1.load(Ordering::SeqCst) {
+                // If this signal has been fired, but we're being dropped (and so not listening to it),
+                // pass the signal on to another receiver
+                chan.try_wake_receiver_if_pending();
+            }
+        }
+    }
+}
+
+impl<'a, T> Future for RecvFut<'a, T> {
+    type Output = Result<T, RecvError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.hook.is_some() {
+            if let Ok(msg) = self.shared.recv_sync(None) {
+                Poll::Ready(Ok(msg))
+            } else if self.shared.is_disconnected() {
+                Poll::Ready(Err(RecvError::Disconnected))
+            } else {
+                Poll::Pending
+            }
         } else {
-            Err(Disconnected)
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.send.disconnected.get() {
-            return Poll::Ready(Err(Disconnected));
-        }
-
-        match self.buf.pop_front() {
-            Some(msg) => match self.send.poll(msg, cx) {
-                Ok(()) => Poll::Ready(Ok(())),
-                Err(PollSendError::Disconnected(m)) => {
-                    self.buf.push_front(m);
-                    Poll::Ready(Err(Disconnected))
-                },
-                Err(e) => { // Need to wait a bit... poll will be rescheduled by `send.poll`
-                    self.buf.push_front(e.into_message());
+            self.shared.recv(
+                // should_block
+                true,
+                // make_signal
+                || Hook::trigger(AsyncSignal(cx.waker().clone(), AtomicBool::new(false))),
+                // do_block
+                |hook| {
+                    self.hook = Some(hook);
                     Poll::Pending
-                },
-            },
-            None => Poll::Ready(Ok(())),
+                }
+            )
+                .map(|r| r.map_err(|err| match err {
+                    TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
+                    _ => unreachable!(),
+                }))
         }
     }
+}
 
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.poll_flush(cx)
+impl<'a, T> FusedFuture for RecvFut<'a, T> {
+    fn is_terminated(&self) -> bool {
+        self.shared.is_disconnected()
+    }
+}
+
+impl<'a, T> Stream for RecvFut<'a, T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.as_mut().poll(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(item) => {
+                // Replace the recv future for every item we receive
+                *self = RecvFut::new(self.shared);
+                Poll::Ready(item.ok())
+            },
+        }
+    }
+}
+
+impl<'a, T> FusedStream for RecvFut<'a, T> {
+    fn is_terminated(&self) -> bool {
+        self.shared.is_disconnected()
     }
 }
