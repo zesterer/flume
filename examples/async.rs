@@ -1,16 +1,16 @@
 #[cfg(feature = "async")]
 #[async_std::main]
 async fn main() {
-    let (tx, rx) = flume::unbounded();
+    let (tx, rx) = flume::bounded(1);
 
     let t = async_std::task::spawn(async move {
-        for msg in rx.iter() {
+        while let Ok(msg) = rx.recv_async().await {
             println!("Received: {}", msg);
         }
     });
 
-    tx.send("Hello, world!").unwrap();
-    tx.send("How are you today?").unwrap();
+    tx.send_async("Hello, world!").await.unwrap();
+    tx.send_async("How are you today?").await.unwrap();
 
     drop(tx);
 
@@ -18,4 +18,4 @@ async fn main() {
 }
 
 #[cfg(not(feature = "async"))]
-fn main () {}
+fn main() {}

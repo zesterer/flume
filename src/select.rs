@@ -27,6 +27,22 @@ trait Selection<'a, T> {
     fn deinit(&mut self);
 }
 
+/// An error that may be emitted when attempting to wait for a value on a receiver.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SelectError {
+    Timeout,
+}
+
+impl fmt::Display for SelectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SelectError::Timeout => "timeout occurred".fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for SelectError {}
+
 /// A type used to wait upon multiple blocking operations at once.
 ///
 /// A [`Selector`] implements [`select`](https://en.wikipedia.org/wiki/Select_(Unix))-like behaviour,
@@ -79,9 +95,8 @@ impl<'a, T> Selector<'a, T> {
 
     /// Add a send operation to the selector that sends the provided value.
     ///
-    /// Once added, the selector can be used to run the provided handler function on completion of
-    /// this operation.
-    pub fn send<U>(mut self, sender: &'a Sender<U>, msg: U, mapper: impl FnMut(Result<(), SendError<U>>) -> T + 'a) -> Self {
+    /// Once added, the selector can be used to run the provided handler function on completion of this operation.
+    pub fn send<U, F: FnMut(Result<(), SendError<U>>) -> T + 'a>(mut self, sender: &'a Sender<U>, msg: U, mapper: F) -> Self {
         struct SendSelection<'a, T, F, U> {
             sender: &'a Sender<U>,
             msg: Option<U>,
@@ -163,9 +178,8 @@ impl<'a, T> Selector<'a, T> {
 
     /// Add a receive operation to the selector.
     ///
-    /// Once added, the selector can be used to run the provided handler function on completion of
-    /// this operation.
-    pub fn recv<U>(mut self, receiver: &'a Receiver<U>, mapper: impl FnMut(Result<U, RecvError>) -> T + 'a) -> Self {
+    /// Once added, the selector can be used to run the provided handler function on completion of this operation.
+    pub fn recv<U, F: FnMut(Result<U, RecvError>) -> T + 'a>(mut self, receiver: &'a Receiver<U>, mapper: F) -> Self {
         struct RecvSelection<'a, T, F, U> {
             receiver: &'a Receiver<U>,
             token: Token,
@@ -296,9 +310,6 @@ impl<'a, T> Selector<'a, T> {
         res
     }
 
-    /// Poll each event associated with this [`Selector`] to see whether any have completed. If
-    /// more than one event has completed, a random event handler will be run and its return value
-    /// returned. If none of the events have completed a `None` is returned.
     fn poll(&mut self) -> Option<T> {
         for _ in 0..self.selections.len() {
             if let Some(val) = self.selections[self.next_poll].poll() {
@@ -309,53 +320,23 @@ impl<'a, T> Selector<'a, T> {
         None
     }
 
-    /// Wait until one of the events associated with this [`Selector`] has completed. If more than
-    /// one event has completed, a random event handler will be run and its return value produced.
+    /// Wait until one of the events associated with this [`Selector`] has completed. If the `eventual-fairness`
+    /// feature flag is enabled, this method is fair and will handle a random event of those that are ready.
     pub fn wait(self) -> T {
         self.wait_inner(None).unwrap()
     }
 
-    /// Wait until one of the events associated with this [`Selector`] has completed or the timeout
-    /// has been reached. If more than one event has completed, a random event handler will be run
-    /// and its return value produced.
-    pub fn wait_timeout(self, dur: Duration) -> T {
-        self.wait_inner(Some(Instant::now() + dur)).unwrap()
+    /// Wait until one of the events associated with this [`Selector`] has completed or the timeout has expired. If the
+    /// `eventual-fairness` feature flag is enabled, this method is fair and will handle a random event of those that
+    /// are ready.
+    pub fn wait_timeout(self, dur: Duration) -> Result<T, SelectError> {
+        self.wait_inner(Some(Instant::now() + dur)).ok_or(SelectError::Timeout)
     }
 
-    // /// Create an iterator over incoming events on this [`Selector`].
-    // pub fn iter(&mut self) -> SelectorIter<'a, '_, T> {
-    //     SelectorIter { selector: self }
-    // }
-
-    // /// Create an iterator over pending events on this [`Selector`]. This iterator will only
-    // /// produce values while there are events immediately available to handle.
-    // pub fn try_iter(&mut self) -> SelectorTryIter<'a, '_, T> {
-    //     SelectorTryIter { selector: self }
-    // }
+    /// Wait until one of the events associated with this [`Selector`] has completed or the deadline has been reached.
+    /// If the `eventual-fairness` feature flag is enabled, this method is fair and will handle a random event of those
+    /// that are ready.
+    pub fn wait_deadline(self, dur: Duration) -> Result<T, SelectError> {
+        self.wait_inner(Some(Instant::now() + dur)).ok_or(SelectError::Timeout)
+    }
 }
-
-// /// An iterator over the events received by a [`Selector`].
-// pub struct SelectorIter<'a, 'b, T> {
-//     selector: &'b mut Selector<'a, T>,
-// }
-
-// impl<'a, 'b, T> Iterator for SelectorIter<'a, 'b, T> {
-//     type Item = T;
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         Some(self.selector.wait_inner())
-//     }
-// }
-
-// /// An iterator over the pending events received by a [`Selector`].
-// pub struct SelectorTryIter<'a, 'b, T> {
-//     selector: &'b mut Selector<'a, T>,
-// }
-
-// impl<'a, 'b, T> Iterator for SelectorTryIter<'a, 'b, T> {
-//     type Item = T;
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         self.selector.poll()
-//     }
-// }

@@ -1,10 +1,10 @@
 //! # Flume
 //!
-//! A blazingly fast multi-producer, single-consumer channel.
+//! A blazingly fast multi-producer, multi-consumer channel.
 //!
 //! *"Do not communicate by sharing memory; instead, share memory by communicating."*
 //!
-//! ## Examples
+//! ## Example
 //!
 //! ```
 //! let (tx, rx) = flume::unbounded();
@@ -32,11 +32,6 @@ use std::{
     thread,
     fmt,
 };
-
-// #[cfg(windows)]
-// use std::sync::{Mutex as InnerMutex, MutexGuard as InnerMutexGuard};
-// #[cfg(not(windows))]
-// use spin::{Mutex as InnerMutex, MutexGuard as InnerMutexGuard};
 
 use spinning_top::{Spinlock, SpinlockGuard};
 use crate::signal::{Signal, SyncSignal};
@@ -807,10 +802,10 @@ impl<T> Iterator for IntoIter<T> {
 
 /// Create a channel with no maximum capacity.
 ///
-/// Create an unbounded channel with a [`Sender`] and [`Receiver`] connected to each end
-/// respectively. Values sent in one end of the channel will be received on the other end. The
-/// channel is thread-safe, and both sender and receiver may be sent to threads as necessary. In
-/// addition, [`Sender`] may be cloned.
+/// Create an unbounded channel with a [`Sender`] and [`Receiver`] connected to each end respectively. Values sent in
+/// one end of the channel will be received on the other end. The channel is thread-safe, and both [`Sender`] and
+/// [`Receiver`] may be sent to or shared between threads as necessary. In addition, both [`Sender`] and [`Receiver`]
+/// may be cloned.
 ///
 /// # Examples
 /// ```
@@ -829,17 +824,19 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 
 /// Create a channel with a maximum capacity.
 ///
-/// Create a bounded channel with a [`Sender`] and [`Receiver`] connected to each end
-/// respectively. Values sent in one end of the channel will be received on the other end. The
-/// channel is thread-safe, and both sender and receiver may be sent to threads as necessary. In
-/// addition, [`Sender`] may be cloned.
+/// Create a bounded channel with a [`Sender`] and [`Receiver`] connected to each end respectively. Values sent in one
+/// end of the channel will be received on the other end. The channel is thread-safe, and both [`Sender`] and
+/// [`Receiver`] may be sent to or shared between threads as necessary. In addition, both [`Sender`] and [`Receiver`]
+/// may be cloned.
 ///
 /// Unlike an [`unbounded`] channel, if there is no space left for new messages, calls to
 /// [`Sender::send`] will block (unblocking once a receiver has made space). If blocking behaviour
 /// is not desired, [`Sender::try_send`] may be used.
 ///
-/// Like `std::sync::mpsc`, `flume` supports 'rendezvous' channels. A bounded queue with a maximum
-/// capacity of zero will block senders until a receiver is available to take the value.
+/// Like `std::sync::mpsc`, `flume` supports 'rendezvous' channels. A bounded queue with a maximum capacity of zero
+/// will block senders until a receiver is available to take the value. You can imagine a rendezvous channel as a
+/// 'Checkpoint Charlie'-style location at which senders and receivers perform a handshake and transfer ownership of a
+/// value.
 ///
 /// # Examples
 /// ```
