@@ -42,6 +42,7 @@ impl<T: Unpin> Sender<T> {
     }
 }
 
+/// A future that sends a value into a channel.
 pub struct SendFuture<'a, T: Unpin> {
     shared: &'a Shared<T>,
     // Only none after dropping
@@ -109,6 +110,7 @@ impl<'a, T: Unpin> FusedFuture for SendFuture<'a, T> {
     }
 }
 
+/// A sink that allows sending values into a channel.
 pub struct SendSink<'a, T: Unpin>(SendFuture<'a, T>);
 
 impl<'a, T: Unpin> Sink<T> for SendSink<'a, T> {

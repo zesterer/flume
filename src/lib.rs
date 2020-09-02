@@ -70,6 +70,7 @@ impl fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
+/// An error that may be emitted when sending a value into a channel on a sender with a timeout.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SendTimeoutError<T> {
     Timeout(T),
@@ -87,7 +88,7 @@ impl<T> fmt::Display for SendTimeoutError<T> {
 
 impl<T> std::error::Error for SendTimeoutError<T> where T: fmt::Debug {}
 
-pub enum TrySendTimeoutError<T> {
+enum TrySendTimeoutError<T> {
     Full(T),
     Disconnected(T),
     Timeout(T),
@@ -146,14 +147,14 @@ impl fmt::Display for RecvTimeoutError {
 
 impl std::error::Error for RecvTimeoutError {}
 
-pub enum TryRecvTimeoutError {
+enum TryRecvTimeoutError {
     Empty,
     Timeout,
     Disconnected,
 }
 
 // TODO: Investigate some sort of invalidation flag for timeouts
-pub struct Hook<T, S: ?Sized>(Option<Spinlock<Option<T>>>, S);
+struct Hook<T, S: ?Sized>(Option<Spinlock<Option<T>>>, S);
 
 impl<T, S: ?Sized + Signal> Hook<T, S> {
     pub fn slot(msg: Option<T>, signal: S) -> Arc<Self> where S: Sized {
@@ -287,9 +288,9 @@ fn wait_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
 use std::sync::{Mutex, MutexGuard};
 
 #[cfg(not(windows))]
-pub type ChanLock<T> = Spinlock<T>;
+type ChanLock<T> = Spinlock<T>;
 #[cfg(windows)]
-pub type ChanLock<T> = Mutex<T>;
+type ChanLock<T> = Mutex<T>;
 
 struct Chan<T> {
     sending: Option<(usize, VecDeque<Arc<Hook<T, dyn signal::Signal>>>)>,
