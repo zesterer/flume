@@ -51,6 +51,19 @@ pub struct Selector<'a, T: 'a> {
     selections: Vec<Box<dyn Selection<'a, T> + 'a>>,
     next_poll: usize,
     signalled: Arc<Spinlock<VecDeque<Token>>>,
+    phantom: PhantomData<*const ()>,
+}
+
+impl<'a, T: 'a> Default for Selector<'a, T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a, T: 'a> fmt::Debug for Selector<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Selector").finish()
+    }
 }
 
 impl<'a, T> Selector<'a, T> {
@@ -60,6 +73,7 @@ impl<'a, T> Selector<'a, T> {
             selections: Vec::new(),
             next_poll: 0,
             signalled: Arc::default(),
+            phantom: PhantomData::default(),
         }
     }
 
