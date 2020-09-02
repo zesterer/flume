@@ -336,7 +336,7 @@ impl<'a, T> Selector<'a, T> {
     /// Wait until one of the events associated with this [`Selector`] has completed or the deadline has been reached.
     /// If the `eventual-fairness` feature flag is enabled, this method is fair and will handle a random event of those
     /// that are ready.
-    pub fn wait_deadline(self, dur: Duration) -> Result<T, SelectError> {
-        self.wait_inner(Some(Instant::now() + dur)).ok_or(SelectError::Timeout)
+    pub fn wait_deadline(self, deadline: Instant) -> Result<T, SelectError> {
+        self.wait_inner(Some(deadline)).ok_or(SelectError::Timeout)
     }
 }
