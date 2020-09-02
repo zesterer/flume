@@ -1,4 +1,4 @@
-#![feature(weak_into_raw)]//! # Flume
+//! # Flume
 //!
 //! A blazingly fast multi-producer, single-consumer channel.
 //!
@@ -26,7 +26,7 @@ pub use select::Selector;
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}, Mutex, MutexGuard},
+    sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}},
     time::{Duration, Instant},
     marker::PhantomData,
     thread,
@@ -283,6 +283,9 @@ fn wait_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
     lock.lock().unwrap()
 }
 
+#[cfg(windows)]
+use std::sync::{Mutex, MutexGuard};
+
 #[cfg(not(windows))]
 pub type ChanLock<T> = Spinlock<T>;
 #[cfg(windows)]
@@ -388,7 +391,10 @@ impl<T> Shared<T> {
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
                             let hook: Arc<Hook<T, dyn signal::Signal>> = hook.clone();
-                            wait_lock(&self.chan).sending.as_mut().unwrap().1.retain(|s| Arc::as_ptr(s) as *const () != Arc::as_ptr(&hook) as *const ());
+                            wait_lock(&self.chan).sending
+                                .as_mut()
+                                .unwrap().1
+                                .retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
                         }
                         hook.try_take().map(|msg| if self.is_disconnected() {
                             Err(TrySendTimeoutError::Disconnected(msg))
@@ -444,7 +450,8 @@ impl<T> Shared<T> {
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
                             let hook: Arc<Hook<T, dyn Signal>> = hook.clone();
-                            wait_lock(&self.chan).waiting.retain(|s| Arc::as_ptr(s) as *const () != Arc::as_ptr(&hook) as *const ());
+                            wait_lock(&self.chan).waiting
+                                .retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
                         }
                         match hook.try_take() {
                             Some(msg) => Ok(msg),

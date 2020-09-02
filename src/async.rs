@@ -52,7 +52,10 @@ impl<'a, T: Unpin> Drop for SendFuture<'a, T> {
     fn drop(&mut self) {
         if let Some(Ok(hook)) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
-            wait_lock(&self.shared.chan).sending.as_mut().unwrap().1.retain(|s| !Arc::ptr_eq(s, &hook));
+            wait_lock(&self.shared.chan).sending
+                .as_mut()
+                .unwrap().1
+                .retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
         }
     }
 }
@@ -165,7 +168,8 @@ impl<'a, T> Drop for RecvFut<'a, T> {
         if let Some(hook) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
             let mut chan = wait_lock(&self.shared.chan);
-            chan.waiting.retain(|s| Arc::as_ptr(s) as *const () != Arc::as_ptr(&hook) as *const ());
+            // We'd like to use `Arc::ptr_eq` here but it doesn't seem to work consistently with wide pointers?
+            chan.waiting.retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
             if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().1.load(Ordering::SeqCst) {
                 // If this signal has been fired, but we're being dropped (and so not listening to it),
                 // pass the signal on to another receiver

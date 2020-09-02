@@ -128,7 +128,7 @@ impl<'a, T> Selector<'a, T> {
                     wait_lock(&self.sender.shared.chan).sending
                         .as_mut()
                         .unwrap().1
-                        .retain(|s| !Arc::ptr_eq(s, &hook));
+                        .retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
                 }
             }
         }
