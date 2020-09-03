@@ -5,6 +5,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll, Waker},
     any::Any,
+    ops::Deref,
 };
 use crate::*;
 use futures::{Stream, stream::FusedStream, future::FusedFuture, Sink};
@@ -12,31 +13,88 @@ use futures::{Stream, stream::FusedStream, future::FusedFuture, Sink};
 struct AsyncSignal(Waker, AtomicBool);
 
 impl Signal for AsyncSignal {
-    fn as_any(&self) -> &(dyn Any + 'static) { self }
-
     fn fire(&self) {
         self.1.store(true, Ordering::SeqCst);
         self.0.wake_by_ref()
     }
+
+    fn as_any(&self) -> &(dyn Any + 'static) { self }
 }
 
-// TODO: Wtf happens with timeout races? Futures can still receive items when not being actively polled...
-// Is this okay? I guess it must be? How do other async channel crates handle it?
+enum OwnedOrRefShared<'a, T> {
+    Owned(Arc<Shared<T>>),
+    Ref(&'a Shared<T>),
+}
+
+impl<'a, T> OwnedOrRefShared<'a, T> {
+    fn owned(arc: Arc<Shared<T>>) -> OwnedOrRefShared<'a, T> {
+        arc.receiver_count.fetch_add(1, Ordering::Relaxed);
+        OwnedOrRefShared::Owned(arc)
+    }
+
+    fn reference(reference: &'a Shared<T>) -> OwnedOrRefShared<'a, T> {
+        OwnedOrRefShared::Ref(reference)
+    }
+}
+
+impl<'a, T> Drop for OwnedOrRefShared<'a, T> {
+    fn drop(&mut self) {
+        if let OwnedOrRefShared::Ref(_) = self {
+            return;
+        }
+
+        // Notify senders that all receivers have been dropped if the number of receivers drops
+        // to 0.
+        if self.receiver_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.disconnect_all();
+        }
+    }
+}
+
+impl<'a, T> Clone for OwnedOrRefShared<'a, T> {
+    fn clone(&self) -> Self {
+        match self {
+            OwnedOrRefShared::Owned(arc) => OwnedOrRefShared::owned(arc.clone()),
+            OwnedOrRefShared::Ref(r) => OwnedOrRefShared::reference(r),
+        }
+    }
+}
+
+impl<'a, T> Deref for OwnedOrRefShared<'a, T> {
+    type Target = Shared<T>;
+
+    fn deref(&self) -> &Shared<T> {
+        match self {
+            OwnedOrRefShared::Owned(arc) => &arc,
+            OwnedOrRefShared::Ref(r) => r,
+        }
+    }
+}
 
 impl<T: Unpin> Sender<T> {
     /// Asynchronously send a value into the channel, returning an error if the channel receiver has
     /// been dropped. If the channel is bounded and is full, this method will yield to the async runtime.
     pub fn send_async(&self, item: T) -> SendFuture<T> {
         SendFuture {
-            shared: &self.shared,
+            shared: OwnedOrRefShared::reference(&self.shared),
             hook: Some(Err(item)),
         }
     }
 
-    /// Use this channel as an asynchronous item sink.
-    pub fn sink(&self) -> SendSink<T> {
+    /// Use this channel as an asynchronous item sink. The returned stream holds a reference
+    /// to the receiver.
+    pub fn sink(&self) -> SendSink<'_, T> {
         SendSink(SendFuture {
-            shared: &self.shared,
+            shared: OwnedOrRefShared::reference(&self.shared),
+            hook: None,
+        })
+    }
+
+    /// Use this channel as an asynchronous item sink. The returned stream has a `'static`
+    /// lifetime.
+    pub fn into_sink(self) -> SendSink<'static, T> {
+        SendSink(SendFuture {
+            shared: OwnedOrRefShared::owned(self.shared.clone()),
             hook: None,
         })
     }
@@ -44,7 +102,7 @@ impl<T: Unpin> Sender<T> {
 
 /// A future that sends a value into a channel.
 pub struct SendFuture<'a, T: Unpin> {
-    shared: &'a Shared<T>,
+    shared: OwnedOrRefShared<'a, T>,
     // Only none after dropping
     hook: Option<Result<Arc<Hook<T, AsyncSignal>>, T>>,
 }
@@ -80,9 +138,13 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
                 Poll::Pending
             };
         } else {
-            self.shared.send(
+            let mut_self = self.get_mut();
+            let shared = &mut_self.shared;
+            let this_hook = &mut mut_self.hook;
+
+            shared.send(
                 // item
-                match self.hook.take().unwrap() {
+                match this_hook.take().unwrap() {
                     Err(item) => item,
                     Ok(_) => return Poll::Ready(Ok(())),
                 },
@@ -92,7 +154,7 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
                 |msg| Hook::slot(Some(msg), AsyncSignal(cx.waker().clone(), AtomicBool::new(false))),
                 // do_block
                 |hook| {
-                    self.hook = Some(Ok(hook));
+                    *this_hook = Some(Ok(hook));
                     Poll::Pending
                 }
             )
@@ -122,7 +184,7 @@ impl<'a, T: Unpin> Sink<T> for SendSink<'a, T> {
 
     fn start_send(mut self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
         self.0 = SendFuture {
-            shared: &self.0.shared,
+            shared: self.0.shared.clone(),
             hook: Some(Err(item)),
         };
 
@@ -141,23 +203,31 @@ impl<'a, T: Unpin> Sink<T> for SendSink<'a, T> {
 impl<T> Receiver<T> {
     /// Asynchronously wait for an incoming value from the channel associated with this receiver,
     /// returning an error if all channel senders have been dropped.
-    pub fn recv_async(&self) -> impl Future<Output=Result<T, RecvError>> + '_ {
-        RecvFut::new(&self.shared)
+    pub fn recv_async(&self) -> RecvFut<'_, T> {
+        RecvFut::new(OwnedOrRefShared::reference(&self.shared))
     }
 
-    /// Use this channel as an asynchronous stream of items.
-    pub fn stream(&self) -> impl Stream<Item=T> + '_ {
-        RecvFut::new(&self.shared)
+    /// Use this channel as an asynchronous stream of items. The returned stream holds a reference
+    /// to the receiver.
+    pub fn stream(&self) -> RecvStream<'_, T> {
+        RecvStream(RecvFut::new(OwnedOrRefShared::reference(&self.shared)))
+    }
+
+    /// Convert this channel into an asynchronous stream of items. The returned stream has a `'static`
+    /// lifetime.
+    pub fn into_stream(self) -> RecvStream<'static, T> {
+        RecvStream(RecvFut::new(OwnedOrRefShared::owned(self.shared.clone())))
     }
 }
 
-struct RecvFut<'a, T> {
-    shared: &'a Shared<T>,
+/// A future which allows asynchronously receiving a message.
+pub struct RecvFut<'a, T> {
+    shared: OwnedOrRefShared<'a, T>,
     hook: Option<Arc<Hook<T, AsyncSignal>>>,
 }
 
 impl<'a, T> RecvFut<'a, T> {
-    fn new(shared: &'a Shared<T>) -> Self {
+    fn new(shared: OwnedOrRefShared<'a, T>) -> Self {
         Self {
             shared,
             hook: None,
@@ -184,7 +254,7 @@ impl<'a, T> Drop for RecvFut<'a, T> {
 impl<'a, T> Future for RecvFut<'a, T> {
     type Output = Result<T, RecvError>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.hook.is_some() {
             if let Ok(msg) = self.shared.recv_sync(None) {
                 Poll::Ready(Ok(msg))
@@ -194,14 +264,18 @@ impl<'a, T> Future for RecvFut<'a, T> {
                 Poll::Pending
             }
         } else {
-            self.shared.recv(
+            let mut_self = self.get_mut();
+            let shared = &(mut_self.shared);
+            let this_hook = &mut (mut_self.hook);
+
+            shared.recv(
                 // should_block
                 true,
                 // make_signal
                 || Hook::trigger(AsyncSignal(cx.waker().clone(), AtomicBool::new(false))),
                 // do_block
                 |hook| {
-                    self.hook = Some(hook);
+                    *this_hook = Some(hook);
                     Poll::Pending
                 }
             )
@@ -219,23 +293,26 @@ impl<'a, T> FusedFuture for RecvFut<'a, T> {
     }
 }
 
-impl<'a, T> Stream for RecvFut<'a, T> {
+/// A stream which allows asynchronously receiving messages.
+pub struct RecvStream<'a, T>(RecvFut<'a, T>);
+
+impl<'a, T> Stream for RecvStream<'a, T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.as_mut().poll(cx) {
+        match Pin::new(&mut self.0).poll(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(item) => {
                 // Replace the recv future for every item we receive
-                *self = RecvFut::new(self.shared);
+                self.0 = RecvFut::new(self.0.shared.clone());
                 Poll::Ready(item.ok())
             },
         }
     }
 }
 
-impl<'a, T> FusedStream for RecvFut<'a, T> {
+impl<'a, T> FusedStream for RecvStream<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.shared.is_disconnected()
+        self.0.shared.is_disconnected()
     }
 }
