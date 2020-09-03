@@ -177,6 +177,15 @@ impl<'a, T: Unpin> Sink<T> for SendSink<'a, T> {
     }
 }
 
+impl<'a, T: Unpin> Clone for SendSink<'a, T> {
+    fn clone(&self) -> SendSink<'a, T> {
+        SendSink(SendFuture {
+            sender: self.0.sender.clone(),
+            hook: None
+        })
+    }
+}
+
 impl<T> Receiver<T> {
     /// Asynchronously wait for an incoming value from the channel associated with this receiver,
     /// returning an error if all channel senders have been dropped.
@@ -275,6 +284,12 @@ impl<'a, T> FusedFuture for RecvFut<'a, T> {
 
 /// A stream which allows asynchronously receiving messages.
 pub struct RecvStream<'a, T>(RecvFut<'a, T>);
+
+impl<'a, T> Clone for RecvStream<'a, T> {
+    fn clone(&self) -> RecvStream<'a, T> {
+        RecvStream(RecvFut::new(self.0.receiver.clone()))
+    }
+}
 
 impl<'a, T> Stream for RecvStream<'a, T> {
     type Item = T;
