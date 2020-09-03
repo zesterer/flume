@@ -230,9 +230,7 @@ impl<T> Hook<T, SyncSignal> {
     pub fn wait_send(&self, abort: &AtomicBool) {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
-            if self.0.as_ref().unwrap().lock().is_none() {
-                break;
-            } else if disconnected {
+            if disconnected || self.0.as_ref().unwrap().lock().is_none() {
                 break;
             }
 
@@ -309,7 +307,7 @@ impl<T> Chan<T> {
     }
 
     fn try_wake_receiver_if_pending(&mut self) {
-        if self.queue.len() > 0 {
+        if !self.queue.is_empty() {
             self.waiting
                 .pop_front()
                 .map(|s| s.fire_nothing());
@@ -350,7 +348,7 @@ impl<T> Shared<T> {
         if self.is_disconnected() {
             Err(TrySendTimeoutError::Disconnected(msg)).into()
         } else if let Some(r) = chan.waiting.pop_front() {
-            debug_assert!(chan.queue.len() == 0);
+            debug_assert!(chan.queue.is_empty());
             if let Some(msg) = r.fire_send(msg) {
                 chan.queue.push_back(msg);
             }
@@ -390,7 +388,7 @@ impl<T> Shared<T> {
                             wait_lock(&self.chan).sending
                                 .as_mut()
                                 .unwrap().1
-                                .retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
+                                .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                         }
                         hook.try_take().map(|msg| if self.is_disconnected() {
                             Err(TrySendTimeoutError::Disconnected(msg))
@@ -447,7 +445,7 @@ impl<T> Shared<T> {
                         if timed_out { // Remove our signal
                             let hook: Arc<Hook<T, dyn Signal>> = hook.clone();
                             wait_lock(&self.chan).waiting
-                                .retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
+                                .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                         }
                         match hook.try_take() {
                             Some(msg) => Ok(msg),

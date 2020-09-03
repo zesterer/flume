@@ -19,6 +19,7 @@ impl Signal for SelectSignal {
     }
 
     fn as_any(&self) -> &(dyn Any + 'static) { self }
+    fn as_ptr(&self) -> *const () { self as *const _ as *const () }
 }
 
 trait Selection<'a, T> {
@@ -157,7 +158,7 @@ impl<'a, T> Selector<'a, T> {
                     wait_lock(&self.sender.shared.chan).sending
                         .as_mut()
                         .unwrap().1
-                        .retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
+                        .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                 }
             }
         }

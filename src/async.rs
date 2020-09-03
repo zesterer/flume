@@ -19,6 +19,7 @@ impl Signal for AsyncSignal {
     }
 
     fn as_any(&self) -> &(dyn Any + 'static) { self }
+    fn as_ptr(&self) -> *const () { self as *const _ as *const () }
 }
 
 #[derive(Clone)]
@@ -81,7 +82,7 @@ impl<'a, T: Unpin> SendFuture<'a, T> {
             wait_lock(&self.sender.shared.chan).sending
                 .as_mut()
                 .unwrap().1
-                .retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
+                .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
         }
     }
 }
@@ -97,7 +98,7 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if let Some(Ok(hook)) = self.hook.as_ref() {
-            return if hook.is_empty() {
+            if hook.is_empty() {
                 Poll::Ready(Ok(()))
             } else if self.sender.shared.is_disconnected() {
                 match self.hook.take().unwrap() {
@@ -109,7 +110,7 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
                 }
             } else {
                 Poll::Pending
-            };
+            }
         } else {
             let mut_self = self.get_mut();
             let (shared, this_hook) = (&mut_self.sender.shared, &mut mut_self.hook);
@@ -215,7 +216,7 @@ impl<'a, T> RecvFut<'a, T> {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
             let mut chan = wait_lock(&self.receiver.shared.chan);
             // We'd like to use `Arc::ptr_eq` here but it doesn't seem to work consistently with wide pointers?
-            chan.waiting.retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
+            chan.waiting.retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
             if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().1.load(Ordering::SeqCst) {
                 // If this signal has been fired, but we're being dropped (and so not listening to it),
                 // pass the signal on to another receiver
@@ -280,7 +281,7 @@ impl<'a, T> Stream for RecvStream<'a, T> {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.0).poll(cx) {
-            Poll::Pending => return Poll::Pending,
+            Poll::Pending => Poll::Pending,
             Poll::Ready(item) => {
                 self.0.reset_hook();
                 Poll::Ready(item.ok())
