@@ -129,3 +129,49 @@ async fn send_1_million_no_drop_or_reorder() {
     let count = t.await;
     assert_eq!(count, 1_000_000)
 }
+
+#[cfg(feature = "async")]
+#[test]
+fn async_no_double_wake() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::pin::Pin;
+    use std::task::Context;
+    use futures::task::{waker, ArcWake};
+    use futures::Stream;
+
+    let mut count = Arc::new(AtomicUsize::new(0));
+
+    // all this waker does is count how many times it is called
+    struct CounterWaker {
+        count: Arc<AtomicUsize>,
+    }
+    
+    impl ArcWake for CounterWaker {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    // create waker and context
+    let w = CounterWaker {
+        count: count.clone(),
+    };
+    let w = waker(Arc::new(w));
+    let cx = &mut Context::from_waker(&w);
+    
+    // create unbounded channel
+    let (tx, mut rx) = unbounded::<()>();
+    let mut stream = rx.stream();
+
+    // register waker with stream
+    Pin::new(&mut stream).poll_next(cx);
+
+    // send multiple items
+    tx.send(());
+    tx.send(());
+    tx.send(());
+
+    // verify that stream is only woken up once.
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
