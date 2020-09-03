@@ -74,8 +74,8 @@ pub struct SendFuture<'a, T: Unpin> {
     hook: Option<Result<Arc<Hook<T, AsyncSignal>>, T>>,
 }
 
-impl<'a, T: Unpin> Drop for SendFuture<'a, T> {
-    fn drop(&mut self) {
+impl<'a, T: Unpin> SendFuture<'a, T> {
+    fn reset_hook(&mut self) {
         if let Some(Ok(hook)) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
             wait_lock(&self.sender.shared.chan).sending
@@ -83,6 +83,12 @@ impl<'a, T: Unpin> Drop for SendFuture<'a, T> {
                 .unwrap().1
                 .retain(|s| s.signal().as_any() as *const _ != hook.signal().as_any() as *const _);
         }
+    }
+}
+
+impl<'a, T: Unpin> Drop for SendFuture<'a, T> {
+    fn drop(&mut self) {
+        self.reset_hook()
     }
 }
 
@@ -106,8 +112,7 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
             };
         } else {
             let mut_self = self.get_mut();
-            let shared = &mut_self.sender.shared;
-            let this_hook = &mut mut_self.hook;
+            let (shared, this_hook) = (&mut_self.sender.shared, &mut mut_self.hook);
 
             shared.send(
                 // item
@@ -150,10 +155,8 @@ impl<'a, T: Unpin> Sink<T> for SendSink<'a, T> {
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        self.0 = SendFuture {
-            sender: self.0.sender.clone(),
-            hook: Some(Err(item)),
-        };
+        self.0.reset_hook();
+        self.0.hook = Some(Err(item));
 
         Ok(())
     }
@@ -200,10 +203,8 @@ impl<'a, T> RecvFut<'a, T> {
             hook: None,
         }
     }
-}
 
-impl<'a, T> Drop for RecvFut<'a, T> {
-    fn drop(&mut self) {
+    fn reset_hook(&mut self) {
         if let Some(hook) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
             let mut chan = wait_lock(&self.receiver.shared.chan);
@@ -215,6 +216,12 @@ impl<'a, T> Drop for RecvFut<'a, T> {
                 chan.try_wake_receiver_if_pending();
             }
         }
+    }
+}
+
+impl<'a, T> Drop for RecvFut<'a, T> {
+    fn drop(&mut self) {
+        self.reset_hook();
     }
 }
 
@@ -232,8 +239,7 @@ impl<'a, T> Future for RecvFut<'a, T> {
             }
         } else {
             let mut_self = self.get_mut();
-            let shared = &(mut_self.receiver.shared);
-            let this_hook = &mut (mut_self.hook);
+            let (shared, this_hook) = (&mut_self.receiver.shared, &mut mut_self.hook);
 
             shared.recv(
                 // should_block
@@ -270,8 +276,7 @@ impl<'a, T> Stream for RecvStream<'a, T> {
         match Pin::new(&mut self.0).poll(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(item) => {
-                // Replace the recv future for every item we receive
-                self.0 = RecvFut::new(self.0.receiver.clone());
+                self.0.reset_hook();
                 Poll::Ready(item.ok())
             },
         }
