@@ -147,6 +147,12 @@ impl<'a, T: Unpin> FusedFuture for SendFuture<'a, T> {
 /// A sink that allows sending values into a channel.
 pub struct SendSink<'a, T: Unpin>(SendFuture<'a, T>);
 
+impl<'a, T: Unpin> SendSink<'a, T> {
+    pub fn is_disconnected(&self) -> bool {
+        self.0.is_terminated()
+    }
+}
+
 impl<'a, T: Unpin> Sink<T> for SendSink<'a, T> {
     type Error = SendError<T>;
 
