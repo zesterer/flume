@@ -1,6 +1,6 @@
 # Flume
 
-A blazingly fast multi-producer, single-consumer channel.
+A blazingly fast multi-producer, multi-consumer channel.
 
 [![Cargo](https://img.shields.io/crates/v/flume.svg)](
 https://crates.io/crates/flume)

@@ -202,7 +202,7 @@ fn send_bounded() {
 fn rendezvous() {
     let (tx, rx) = bounded(0);
 
-    for i in 0..20 {
+    for i in 0..5 {
         let tx = tx.clone();
         let t = std::thread::spawn(move || {
             assert!(tx.try_send(()).is_err());
@@ -243,7 +243,7 @@ fn hydra() {
 
     drop(main_tx);
 
-    for _ in 0..10000 {
+    for _ in 0..10 {
         for tx in &txs {
             for _ in 0..msg_num {
                 tx.send(Default::default()).unwrap();
@@ -279,7 +279,7 @@ fn robin() {
         });
     }
 
-    for _ in 0..10000 {
+    for _ in 0..10 {
         let main_tx = main_tx.clone();
         std::thread::spawn(move || {
             for _ in 0..msg_num {
