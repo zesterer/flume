@@ -12,10 +12,11 @@ type Token = usize;
 struct SelectSignal(thread::Thread, Token, AtomicBool, Arc<Spinlock<VecDeque<Token>>>);
 
 impl Signal for SelectSignal {
-    fn fire(&self) {
+    fn fire(&self) -> bool {
         self.2.store(true, Ordering::SeqCst);
         self.3.lock().push_back(self.1);
         self.0.unpark();
+        true
     }
 
     fn as_any(&self) -> &(dyn Any + 'static) { self }
