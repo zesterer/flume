@@ -10,17 +10,33 @@ use std::{
 use crate::*;
 use futures::{Stream, stream::FusedStream, future::FusedFuture, Sink};
 
-struct AsyncSignal(Waker, AtomicBool);
+struct AsyncSignal {
+    waker: Waker,
+    woken: AtomicBool,
+    stream: bool,
+}
+
+impl AsyncSignal {
+    fn new(cx: &Context, stream: bool) -> Self {
+        AsyncSignal {
+            waker: cx.waker().clone(),
+            woken: AtomicBool::new(false),
+            stream,
+        }
+    }
+}
 
 impl Signal for AsyncSignal {
-    fn fire(&self) {
-        self.1.store(true, Ordering::SeqCst);
-        self.0.wake_by_ref()
+    fn fire(&self) -> bool {
+        self.woken.store(true, Ordering::SeqCst);
+        self.waker.wake_by_ref();
+        self.stream
     }
 
     fn as_any(&self) -> &(dyn Any + 'static) { self }
     fn as_ptr(&self) -> *const () { self as *const _ as *const () }
 }
+
 
 #[derive(Clone)]
 enum OwnedOrRef<'a, T> {
@@ -124,7 +140,7 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
                 // should_block
                 true,
                 // make_signal
-                |msg| Hook::slot(Some(msg), AsyncSignal(cx.waker().clone(), AtomicBool::new(false))),
+                |msg| Hook::slot(Some(msg), AsyncSignal::new(cx, false)),
                 // do_block
                 |hook| {
                     *this_hook = Some(Ok(hook));
@@ -226,25 +242,19 @@ impl<'a, T> RecvFut<'a, T> {
             let mut chan = wait_lock(&self.receiver.shared.chan);
             // We'd like to use `Arc::ptr_eq` here but it doesn't seem to work consistently with wide pointers?
             chan.waiting.retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
-            if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().1.load(Ordering::SeqCst) {
+            if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().woken.load(Ordering::SeqCst) {
                 // If this signal has been fired, but we're being dropped (and so not listening to it),
                 // pass the signal on to another receiver
                 chan.try_wake_receiver_if_pending();
             }
         }
     }
-}
 
-impl<'a, T> Drop for RecvFut<'a, T> {
-    fn drop(&mut self) {
-        self.reset_hook();
-    }
-}
-
-impl<'a, T> Future for RecvFut<'a, T> {
-    type Output = Result<T, RecvError>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll_inner(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+        stream: bool
+    ) -> Poll<Result<T, RecvError>> {
         if self.hook.is_some() {
             if let Ok(msg) = self.receiver.shared.recv_sync(None) {
                 Poll::Ready(Ok(msg))
@@ -261,7 +271,7 @@ impl<'a, T> Future for RecvFut<'a, T> {
                 // should_block
                 true,
                 // make_signal
-                || Hook::trigger(AsyncSignal(cx.waker().clone(), AtomicBool::new(false))),
+                || Hook::trigger(AsyncSignal::new(cx, stream)),
                 // do_block
                 |hook| {
                     *this_hook = Some(hook);
@@ -273,6 +283,20 @@ impl<'a, T> Future for RecvFut<'a, T> {
                     _ => unreachable!(),
                 }))
         }
+    }
+}
+
+impl<'a, T> Drop for RecvFut<'a, T> {
+    fn drop(&mut self) {
+        self.reset_hook();
+    }
+}
+
+impl<'a, T> Future for RecvFut<'a, T> {
+    type Output = Result<T, RecvError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.poll_inner(cx, false) // stream = false
     }
 }
 
@@ -295,7 +319,7 @@ impl<'a, T> Stream for RecvStream<'a, T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.0).poll(cx) {
+        match Pin::new(&mut self.0).poll_inner(cx, true) { // stream = true
             Poll::Pending => Poll::Pending,
             Poll::Ready(item) => {
                 self.0.reset_hook();

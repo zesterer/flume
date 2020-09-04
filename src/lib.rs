@@ -164,17 +164,17 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
         &self.1
     }
 
-    pub fn fire_nothing(&self) {
-        self.signal().fire();
+    pub fn fire_nothing(&self) -> bool {
+        self.signal().fire()
     }
 
     pub fn fire_recv(&self) -> T {
         let msg = self.0.as_ref().unwrap().lock().take().unwrap();
-        self.signal().fire();
+        let _ = self.signal().fire(); // Sender cannot be a stream
         msg
     }
 
-    pub fn fire_send(&self, msg: T) -> Option<T> {
+    pub fn fire_send(&self, msg: T) -> (Option<T>, bool) {
         let ret = match &self.0 {
             Some(hook) => {
                 *hook.lock() = Some(msg);
@@ -182,8 +182,8 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
             },
             None => Some(msg),
         };
-        self.signal().fire();
-        ret
+        let was_stream = self.signal().fire();
+        (ret, was_stream)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -308,9 +308,7 @@ impl<T> Chan<T> {
 
     fn try_wake_receiver_if_pending(&mut self) {
         if !self.queue.is_empty() {
-            self.waiting
-                .pop_front()
-                .map(|s| s.fire_nothing());
+            while Some(false) == self.waiting.pop_front().map(|s| s.fire_nothing()) {}
         }
     }
 }
@@ -347,11 +345,31 @@ impl<T> Shared<T> {
 
         if self.is_disconnected() {
             Err(TrySendTimeoutError::Disconnected(msg)).into()
-        } else if let Some(r) = chan.waiting.pop_front() {
+        } else if !chan.waiting.is_empty() {
             debug_assert!(chan.queue.is_empty());
-            if let Some(msg) = r.fire_send(msg) {
-                chan.queue.push_back(msg);
+
+            let mut msg = Some(msg);
+
+            // TODO(stream): investigate how this impacts starvation
+            loop {
+                match chan.waiting.pop_front().map(|r| r.fire_send(msg.take().unwrap())) {
+                    None => break, // No more waiting receivers, so break out of the loop
+                    Some((Some(m), true)) => {
+                        // Was async and a stream, so didn't acquire the message. Wake another
+                        // receiver, and do not yet push the message.
+                        msg.replace(m);
+                        continue
+                    },
+                    Some((Some(m), false)) => {
+                        // Was async and not a stream, so it did acquire the message. Push the
+                        // message to the queue.
+                        chan.queue.push_front(m);
+                        break
+                    }
+                    Some((None, _)) => break, // Was sync, so it has acquired the message
+                }
             }
+
             Ok(()).into()
         } else if chan.sending.as_ref().map(|(cap, _)| chan.queue.len() < *cap).unwrap_or(true) {
             chan.queue.push_back(msg);
@@ -476,8 +494,10 @@ impl<T> Shared<T> {
 
         let mut chan = wait_lock(&self.chan);
         chan.pull_pending(false);
-        chan.sending.as_ref().map(|(_, sending)| sending.iter().for_each(|hook| hook.signal().fire()));
-        chan.waiting.iter().for_each(|hook| hook.signal().fire());
+        chan.sending.as_ref().map(|(_, sending)| sending.iter().for_each(|hook| {
+            hook.signal().fire();
+        }));
+        chan.waiting.iter().for_each(|hook| { hook.signal().fire(); });
     }
 
     fn is_disconnected(&self) -> bool {
