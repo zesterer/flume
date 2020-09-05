@@ -19,7 +19,7 @@ impl Default for SyncSignal {
 impl Signal for SyncSignal {
     fn fire(&self) -> bool {
         self.0.unpark();
-        true
+        false
     }
     fn as_any(&self) -> &(dyn Any + 'static) { self }
     fn as_ptr(&self) -> *const () { self as *const _ as *const () }

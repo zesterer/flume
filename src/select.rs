@@ -16,7 +16,7 @@ impl Signal for SelectSignal {
         self.2.store(true, Ordering::SeqCst);
         self.3.lock().push_back(self.1);
         self.0.unpark();
-        true
+        false
     }
 
     fn as_any(&self) -> &(dyn Any + 'static) { self }
