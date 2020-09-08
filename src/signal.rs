@@ -1,8 +1,10 @@
 use std::{thread::{self, Thread}, time::Duration, any::Any};
 
 pub trait Signal: Send + Sync + 'static {
-    /// Fire the signal, returning whether it is a stream signal
-    // TODO(stream) explain why this matters
+    /// Fire the signal, returning whether it is a stream signal. This is because streams do not
+    /// acquire a message when woken, so signals must be fired until one that does acquire a message
+    /// is fired, otherwise a wakeup could be missed, leading to a lost message until one is eagerly
+    /// grabbed by a receiver.
     fn fire(&self) -> bool;
     fn as_any(&self) -> &(dyn Any + 'static);
     fn as_ptr(&self) -> *const ();
