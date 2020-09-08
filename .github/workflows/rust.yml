@@ -62,5 +62,7 @@ jobs:
       if: matrix.build == 'linux32'
     - run: cargo build --target ${{ matrix.target }}
     - run: cargo test --target ${{ matrix.target }}
+    # FIXME(#41): Some timeout/deadline tests make more sense to run in release mode.
+    #- run: cargo test --release --target ${{ matrix.target }}
     - run: cargo build --all-targets --target ${{ matrix.target }}
     - run: cargo build --all-targets --no-default-features --target ${{ matrix.target }}
