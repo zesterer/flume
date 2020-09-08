@@ -261,6 +261,8 @@ impl<'a, T> RecvFut<'a, T> {
             } else if self.receiver.shared.is_disconnected() {
                 Poll::Ready(Err(RecvError::Disconnected))
             } else {
+                let hook = self.hook.as_ref().map(Arc::clone).unwrap();
+                wait_lock(&self.receiver.shared.chan).waiting.push_back(hook);
                 Poll::Pending
             }
         } else {
