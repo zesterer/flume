@@ -304,7 +304,7 @@ impl<'a, T> Future for RecvFut<'a, T> {
 
 impl<'a, T> FusedFuture for RecvFut<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.receiver.shared.is_disconnected()
+        self.receiver.shared.is_disconnected() && self.receiver.shared.is_empty()
     }
 }
 

@@ -348,10 +348,15 @@ impl<T> Shared<T> {
         } else if !chan.waiting.is_empty() {
             let mut msg = Some(msg);
 
-            // TODO(stream): investigate how this impacts starvation
             loop {
                 match chan.waiting.pop_front().map(|r| r.fire_send(msg.take().unwrap())) {
-                    None => break, // No more waiting receivers, so break out of the loop
+                    // No more waiting receivers and msg in queue, so break out of the loop
+                    None if msg.is_none() => break,
+                    // No more waiting receivers, so add msg to queue and break out of the loop
+                    None => {
+                        chan.queue.push_front(msg.unwrap());
+                        break;
+                    }
                     Some((Some(m), true)) => {
                         // Was async and a stream, so didn't acquire the message. Wake another
                         // receiver, and do not yet push the message.

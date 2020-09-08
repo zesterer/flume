@@ -3,21 +3,25 @@ use {
     flume::*,
     futures::{stream::FuturesUnordered, StreamExt, TryFutureExt},
     async_std::prelude::FutureExt,
-    std::time::Duration
+    std::time::Duration,
 };
 
 #[cfg(feature = "async")]
 #[test]
-fn r#async_recv() {
+fn stream_recv() {
     let (tx, mut rx) = unbounded();
 
     let t = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(250));
         tx.send(42u32).unwrap();
+        println!("sent");
     });
 
     async_std::task::block_on(async {
-        assert_eq!(rx.recv_async().await.unwrap(), 42);
+        println!("receiving...");
+        let x = rx.stream().next().await;
+        println!("received");
+        assert_eq!(x, Some(42));
     });
 
     t.join().unwrap();
@@ -25,24 +29,7 @@ fn r#async_recv() {
 
 #[cfg(feature = "async")]
 #[test]
-fn r#async_send() {
-    let (tx, mut rx) = bounded(1);
-
-    let t = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        assert_eq!(rx.recv(), Ok(42));
-    });
-
-    async_std::task::block_on(async {
-        tx.send_async(42u32).await.unwrap();
-    });
-
-    t.join().unwrap();
-}
-
-#[cfg(feature = "async")]
-#[test]
-fn r#async_recv_disconnect() {
+fn stream_recv_disconnect() {
     let (tx, mut rx) = bounded::<i32>(0);
 
     let t = std::thread::spawn(move || {
@@ -51,7 +38,7 @@ fn r#async_recv_disconnect() {
     });
 
     async_std::task::block_on(async {
-        assert_eq!(rx.recv_async().await, Err(RecvError::Disconnected));
+        assert_eq!(rx.stream().next().await, None);
     });
 
     t.join().unwrap();
@@ -59,37 +46,24 @@ fn r#async_recv_disconnect() {
 
 #[cfg(feature = "async")]
 #[test]
-fn r#async_send_disconnect() {
-    let (tx, mut rx) = bounded(0);
-
-    let t = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        drop(rx)
-    });
-
-    async_std::task::block_on(async {
-        assert_eq!(tx.send_async(42u32).await, Err(SendError(42)));
-    });
-
-    t.join().unwrap();
-}
-
-#[cfg(feature = "async")]
-#[test]
-fn r#async_recv_drop_recv() {
+fn stream_recv_drop_recv() {
     let (tx, mut rx) = bounded::<i32>(10);
 
-    let recv_fut = rx.recv_async();
+    let rx2 = rx.clone();
+    let mut stream = rx.into_stream();
 
     async_std::task::block_on(async {
-        let res = async_std::future::timeout(std::time::Duration::from_millis(500), rx.recv_async()).await;
+        let res = async_std::future::timeout(
+            std::time::Duration::from_millis(500),
+            stream.next()
+        ).await;
+
         assert!(res.is_err());
     });
 
-    let rx2 = rx.clone();
     let t = std::thread::spawn(move || {
         async_std::task::block_on(async {
-            rx2.recv_async().await
+            rx2.stream().next().await
         })
     });
 
@@ -97,14 +71,14 @@ fn r#async_recv_drop_recv() {
 
     tx.send(42).unwrap();
 
-    drop(recv_fut);
+    drop(stream);
 
-    assert_eq!(t.join().unwrap(), Ok(42))
+    assert_eq!(t.join().unwrap(), Some(42))
 }
 
 #[cfg(feature = "async")]
 #[async_std::test]
-async fn r#async_send_100_million_no_drop_or_reorder() {
+async fn stream_send_100_million_no_drop_or_reorder() {
     #[derive(Debug)]
     enum Message {
         Increment {
@@ -117,8 +91,9 @@ async fn r#async_send_100_million_no_drop_or_reorder() {
 
     let t = async_std::task::spawn(async move {
         let mut count = 0u64;
+        let mut stream = rx.into_stream();
 
-        while let Ok(Message::Increment { old }) = rx.recv_async().await {
+        while let Some(Message::Increment { old }) = stream.next().await {
             assert_eq!(old, count);
             count += 1;
         }
@@ -138,8 +113,9 @@ async fn r#async_send_100_million_no_drop_or_reorder() {
 
 #[cfg(feature = "async")]
 #[async_std::test]
-async fn parallel_async_receivers() {
+async fn parallel_streams_and_async_recv() {
     let (tx, rx) = flume::unbounded();
+    let rx = &rx;
     let send_fut = async move {
         let n_sends: usize = 100000;
         for _ in 0..n_sends {
@@ -154,10 +130,14 @@ async fn parallel_async_receivers() {
     );
 
     let mut futures_unordered = (0..250)
-        .map(|_| async {
-            while let Ok(()) = rx.recv_async().await
-            /* rx.recv() is OK */
-            {}
+        .map(|n| async move {
+            if n % 2 == 0 {
+                let mut stream = rx.stream();
+                while let Some(()) = stream.next().await {}
+            } else {
+                while let Ok(()) = rx.recv_async().await {}
+            }
+
         })
         .collect::<FuturesUnordered<_>>();
 
@@ -169,6 +149,4 @@ async fn parallel_async_receivers() {
         .timeout(Duration::from_secs(5))
         .map_err(|_| panic!("Receive timed out!"))
         .await;
-
-    println!("recv end");
 }
