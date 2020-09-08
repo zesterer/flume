@@ -78,7 +78,7 @@ fn stream_recv_drop_recv() {
 
 #[cfg(feature = "async")]
 #[async_std::test]
-async fn stream_send_100_million_no_drop_or_reorder() {
+async fn stream_send_1_million_no_drop_or_reorder() {
     #[derive(Debug)]
     enum Message {
         Increment {
@@ -101,14 +101,14 @@ async fn stream_send_100_million_no_drop_or_reorder() {
         count
     });
 
-    for next in 0..100_000_000 {
+    for next in 0..1_000_000 {
         tx.send(Message::Increment { old: next }).unwrap();
     }
 
     tx.send(Message::ReturnCount).unwrap();
 
     let count = t.await;
-    assert_eq!(count, 100_000_000)
+    assert_eq!(count, 1_000_000)
 }
 
 #[cfg(feature = "async")]
@@ -149,4 +149,50 @@ async fn parallel_streams_and_async_recv() {
         .timeout(Duration::from_secs(5))
         .map_err(|_| panic!("Receive timed out!"))
         .await;
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn stream_no_double_wake() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::pin::Pin;
+    use std::task::Context;
+    use futures::task::{waker, ArcWake};
+    use futures::Stream;
+
+    let mut count = Arc::new(AtomicUsize::new(0));
+
+    // all this waker does is count how many times it is called
+    struct CounterWaker {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl ArcWake for CounterWaker {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    // create waker and context
+    let w = CounterWaker {
+        count: count.clone(),
+    };
+    let w = waker(Arc::new(w));
+    let cx = &mut Context::from_waker(&w);
+
+    // create unbounded channel
+    let (tx, mut rx) = unbounded::<()>();
+    let mut stream = rx.stream();
+
+    // register waker with stream
+    Pin::new(&mut stream).poll_next(cx);
+
+    // send multiple items
+    tx.send(()).unwrap();
+    tx.send(()).unwrap();
+    tx.send(()).unwrap();
+
+    // verify that stream is only woken up once.
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }

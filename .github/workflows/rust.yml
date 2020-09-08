@@ -8,12 +8,61 @@ on:
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
-
+    runs-on: ${{ matrix.os }}
+    env:
+      RUST_BACKTRACE: 1
+    strategy:
+      matrix:
+        build: [linux64, linux32, macos, win32, win64]
+        include:
+          - build: linux64
+            os: ubuntu-latest
+            channel: stable
+            target: x86_64-unknown-linux-gnu
+          - build: linux32
+            os: ubuntu-latest
+            channel: stable
+            target: i686-unknown-linux-gnu
+          - build: macos
+            os: macos-latest
+            channel: stable
+            target: x86_64-apple-darwin
+          - build: win32
+            os: windows-latest
+            channel: stable
+            target: i686-pc-windows-msvc
+          - build: win64
+            os: windows-latest
+            channel: stable
+            target: x86_64-pc-windows-msvc
     steps:
     - uses: actions/checkout@v2
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+    - run: |
+        TOOLCHAIN=${{ matrix.channel }}-${{ matrix.target }}
+        rustup toolchain install --no-self-update $TOOLCHAIN
+        rustup default $TOOLCHAIN
+      shell: bash
+    - name: Rust version
+      run: |
+        set -ex
+        rustc -Vv
+        cargo -V
+        rustup show
+      shell: bash
+    # copy from <https://git.io/JUGmV>.
+    - name: Install g++-multilib
+      run: |
+        set -e
+        # Remove the ubuntu-toolchain-r/test PPA, which is added by default.
+        # Some packages were removed, and this is causing the g++multilib
+        # install to fail. Similar issue:
+        # https://github.com/scikit-learn/scikit-learn/issues/13928.
+        sudo add-apt-repository --remove ppa:ubuntu-toolchain-r/test
+        sudo apt-get install g++-multilib
+      if: matrix.build == 'linux32'
+    - run: cargo build --target ${{ matrix.target }}
+    - run: cargo test --target ${{ matrix.target }}
+    # FIXME(#41): Some timeout/deadline tests make more sense to run in release mode.
+    #- run: cargo test --release --target ${{ matrix.target }}
+    - run: cargo build --all-targets --target ${{ matrix.target }}
+    - run: cargo build --all-targets --no-default-features --target ${{ matrix.target }}

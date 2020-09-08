@@ -104,7 +104,7 @@ fn r#async_recv_drop_recv() {
 
 #[cfg(feature = "async")]
 #[async_std::test]
-async fn r#async_send_100_million_no_drop_or_reorder() {
+async fn r#async_send_1_million_no_drop_or_reorder() {
     #[derive(Debug)]
     enum Message {
         Increment {
@@ -126,14 +126,14 @@ async fn r#async_send_100_million_no_drop_or_reorder() {
         count
     });
 
-    for next in 0..100_000_000 {
+    for next in 0..1_000_000 {
         tx.send(Message::Increment { old: next }).unwrap();
     }
 
     tx.send(Message::ReturnCount).unwrap();
 
     let count = t.await;
-    assert_eq!(count, 100_000_000)
+    assert_eq!(count, 1_000_000)
 }
 
 #[cfg(feature = "async")]
