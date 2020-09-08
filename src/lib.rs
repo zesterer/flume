@@ -346,8 +346,6 @@ impl<T> Shared<T> {
         if self.is_disconnected() {
             Err(TrySendTimeoutError::Disconnected(msg)).into()
         } else if !chan.waiting.is_empty() {
-            debug_assert!(chan.queue.is_empty());
-
             let mut msg = Some(msg);
 
             // TODO(stream): investigate how this impacts starvation
@@ -362,7 +360,7 @@ impl<T> Shared<T> {
                     },
                     Some((Some(m), false)) => {
                         // Was async and not a stream, so it did acquire the message. Push the
-                        // message to the queue.
+                        // message to the queue for it to be received.
                         chan.queue.push_front(m);
                         break
                     }
