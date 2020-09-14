@@ -65,6 +65,15 @@ impl<T: Unpin> Sender<T> {
         }
     }
 
+    /// Clones the channel and asynchronously send a value, returning an error if the channel receiver has
+    /// been dropped. If the channel is bounded and is full, this method will yield to the async runtime.
+    pub fn into_send_async(self, item: T) -> SendFuture<T> {
+        SendFuture {
+            sender: OwnedOrRef::Owned(self),
+            hook: Some(Err(item)),
+        }
+    }
+
     /// Use this channel as an asynchronous item sink. The returned stream holds a reference
     /// to the receiver.
     pub fn sink(&self) -> SendSink<'_, T> {
