@@ -218,6 +218,12 @@ impl<T> Receiver<T> {
         RecvFut::new(OwnedOrRef::Ref(self))
     }
 
+    /// Clones the channel and asynchronously wait for an incoming value from the channel associated
+    /// with this receiver, returning an error if all channel senders have been dropped.
+    pub fn into_recv_async(self) -> RecvFut<T> {
+        RecvFut::new(OwnedOrRef::Owned(self))
+    }
+
     /// Use this channel as an asynchronous stream of items. The returned stream holds a reference
     /// to the receiver.
     pub fn stream(&self) -> RecvStream<'_, T> {
