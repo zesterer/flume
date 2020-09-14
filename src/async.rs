@@ -67,7 +67,7 @@ impl<T: Unpin> Sender<T> {
 
     /// Clones the channel and asynchronously send a value, returning an error if the channel receiver has
     /// been dropped. If the channel is bounded and is full, this method will yield to the async runtime.
-    pub fn into_send_async(self, item: T) -> SendFuture<T> {
+    pub fn into_send_async(self, item: T) -> SendFuture<'static, T> {
         SendFuture {
             sender: OwnedOrRef::Owned(self),
             hook: Some(Err(item)),
@@ -220,7 +220,7 @@ impl<T> Receiver<T> {
 
     /// Clones the channel and asynchronously wait for an incoming value from the channel associated
     /// with this receiver, returning an error if all channel senders have been dropped.
-    pub fn into_recv_async(self) -> RecvFut<T> {
+    pub fn into_recv_async(self) -> RecvFut<'static, T> {
         RecvFut::new(OwnedOrRef::Owned(self))
     }
 
