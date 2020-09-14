@@ -230,7 +230,7 @@ fn rendezvous() {
             assert!(now.duration_since(then) > Duration::from_millis(50), "iter = {}", i);
         });
 
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(500));
         rx.recv().unwrap();
 
         t.join().unwrap();
