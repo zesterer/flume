@@ -8,7 +8,8 @@ use std::{
     ops::Deref,
 };
 use crate::*;
-use futures::{Stream, stream::FusedStream, future::FusedFuture, Sink};
+use futures_core::{stream::{Stream, FusedStream}, future::FusedFuture};
+use futures_sink::Sink;
 
 struct AsyncSignal {
     waker: Waker,
