@@ -8,7 +8,7 @@ https://crates.io/crates/flume)
 https://docs.rs/flume)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](
 https://github.com/zesterer/flume)
-![actions-badge](https://github.com/zesterer/flume/workflows/Rust/badge.svg)
+![actions-badge](https://github.com/zesterer/flume/workflows/Rust/badge.svg?branch=master)
 
 ```rust
 let (tx, rx) = flume::unbounded();
