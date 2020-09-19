@@ -37,8 +37,14 @@ use spinning_top::{Spinlock, SpinlockGuard};
 use crate::signal::{Signal, SyncSignal};
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct SendError<T>(pub T);
+
+impl<T> fmt::Debug for SendError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        "SendError(..)".fmt(f)
+    }
+}
 
 impl<T> fmt::Display for SendError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -49,27 +55,43 @@ impl<T> fmt::Display for SendError<T> {
 impl<T> std::error::Error for SendError<T> where T: fmt::Debug {}
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum TrySendError<T> {
     Full(T),
     Disconnected(T),
 }
 
-impl fmt::Display for RecvError {
+impl<T> fmt::Debug for TrySendError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RecvError::Disconnected => "receiving on a closed channel".fmt(f),
+        match *self {
+            TrySendError::Full(..) => "Full(..)".fmt(f),
+            TrySendError::Disconnected(..) => "Disconnected(..)".fmt(f),
         }
     }
 }
 
-impl std::error::Error for RecvError {}
+impl<T> fmt::Display for TrySendError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrySendError::Full(..) => "sending on a full channel".fmt(f),
+            TrySendError::Disconnected(..) => "sending on a closed channel".fmt(f),
+        }
+    }
+}
+
+impl<T> std::error::Error for TrySendError<T> where T: fmt::Debug {}
 
 /// An error that may be emitted when sending a value into a channel on a sender with a timeout.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum SendTimeoutError<T> {
     Timeout(T),
     Disconnected(T),
+}
+
+impl<T> fmt::Debug for SendTimeoutError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        "SendTimeoutError(..)".fmt(f)
+    }
 }
 
 impl<T> fmt::Display for SendTimeoutError<T> {
@@ -95,16 +117,15 @@ pub enum RecvError {
     Disconnected,
 }
 
-impl<T> fmt::Display for TrySendError<T> {
+impl fmt::Display for RecvError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TrySendError::Full(..) => "sending on a full channel".fmt(f),
-            TrySendError::Disconnected(..) => "sending on a closed channel".fmt(f),
+            RecvError::Disconnected => "receiving on a closed channel".fmt(f),
         }
     }
 }
 
-impl<T> std::error::Error for TrySendError<T> where T: fmt::Debug {}
+impl std::error::Error for RecvError {}
 
 /// An error that may be emitted when attempting to fetch a value on a receiver.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
