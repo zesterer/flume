@@ -1,15 +1,18 @@
 //! Types that permit waiting upon multiple blocking operations using the [`Selector`] interface.
 
 use crate::*;
-use std::{
-    any::Any,
-    marker::PhantomData,
-};
+use nanorand::RNG;
+use std::{any::Any, marker::PhantomData};
 
 // A unique token corresponding to an event in a selector
 type Token = usize;
 
-struct SelectSignal(thread::Thread, Token, AtomicBool, Arc<Spinlock<VecDeque<Token>>>);
+struct SelectSignal(
+    thread::Thread,
+    Token,
+    AtomicBool,
+    Arc<Spinlock<VecDeque<Token>>>,
+);
 
 impl Signal for SelectSignal {
     fn fire(&self) -> bool {
@@ -19,8 +22,12 @@ impl Signal for SelectSignal {
         false
     }
 
-    fn as_any(&self) -> &(dyn Any + 'static) { self }
-    fn as_ptr(&self) -> *const () { self as *const _ as *const () }
+    fn as_any(&self) -> &(dyn Any + 'static) {
+        self
+    }
+    fn as_ptr(&self) -> *const () {
+        self as *const _ as *const ()
+    }
 }
 
 trait Selection<'a, T> {
@@ -98,7 +105,12 @@ impl<'a, T> Selector<'a, T> {
     /// Add a send operation to the selector that sends the provided value.
     ///
     /// Once added, the selector can be used to run the provided handler function on completion of this operation.
-    pub fn send<U, F: FnMut(Result<(), SendError<U>>) -> T + 'a>(mut self, sender: &'a Sender<U>, msg: U, mapper: F) -> Self {
+    pub fn send<U, F: FnMut(Result<(), SendError<U>>) -> T + 'a>(
+        mut self,
+        sender: &'a Sender<U>,
+        msg: U,
+        mapper: F,
+    ) -> Self {
         struct SendSelection<'a, T, F, U> {
             sender: &'a Sender<U>,
             msg: Option<U>,
@@ -110,7 +122,8 @@ impl<'a, T> Selector<'a, T> {
         }
 
         impl<'a, T, F, U> Selection<'a, T> for SendSelection<'a, T, F, U>
-            where F: FnMut(Result<(), SendError<U>>) -> T
+        where
+            F: FnMut(Result<(), SendError<U>>) -> T,
         {
             fn init(&mut self) -> Option<T> {
                 let token = self.token;
@@ -118,9 +131,22 @@ impl<'a, T> Selector<'a, T> {
                 let r = self.sender.shared.send(
                     self.msg.take().unwrap(),
                     true,
-                    |msg| Hook::slot(Some(msg), SelectSignal(thread::current(), token, AtomicBool::new(false), signalled)),
+                    |msg| {
+                        Hook::slot(
+                            Some(msg),
+                            SelectSignal(
+                                thread::current(),
+                                token,
+                                AtomicBool::new(false),
+                                signalled,
+                            ),
+                        )
+                    },
                     // Always runs
-                    |h| { self.hook = Some(h); Ok(()) },
+                    |h| {
+                        self.hook = Some(h);
+                        Ok(())
+                    },
                 );
 
                 if self.hook.is_none() {
@@ -146,7 +172,7 @@ impl<'a, T> Selector<'a, T> {
                     // The message was sent
                     Ok(())
                 } else {
-                    return None
+                    return None;
                 };
 
                 Some((&mut self.mapper)(res))
@@ -156,9 +182,11 @@ impl<'a, T> Selector<'a, T> {
                 if let Some(hook) = self.hook.take() {
                     // Remove hook
                     let hook: Arc<Hook<U, dyn Signal>> = hook;
-                    wait_lock(&self.sender.shared.chan).sending
+                    wait_lock(&self.sender.shared.chan)
+                        .sending
                         .as_mut()
-                        .unwrap().1
+                        .unwrap()
+                        .1
                         .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                 }
             }
@@ -181,7 +209,11 @@ impl<'a, T> Selector<'a, T> {
     /// Add a receive operation to the selector.
     ///
     /// Once added, the selector can be used to run the provided handler function on completion of this operation.
-    pub fn recv<U, F: FnMut(Result<U, RecvError>) -> T + 'a>(mut self, receiver: &'a Receiver<U>, mapper: F) -> Self {
+    pub fn recv<U, F: FnMut(Result<U, RecvError>) -> T + 'a>(
+        mut self,
+        receiver: &'a Receiver<U>,
+        mapper: F,
+    ) -> Self {
         struct RecvSelection<'a, T, F, U> {
             receiver: &'a Receiver<U>,
             token: Token,
@@ -193,16 +225,27 @@ impl<'a, T> Selector<'a, T> {
         }
 
         impl<'a, T, F, U> Selection<'a, T> for RecvSelection<'a, T, F, U>
-            where F: FnMut(Result<U, RecvError>) -> T
+        where
+            F: FnMut(Result<U, RecvError>) -> T,
         {
             fn init(&mut self) -> Option<T> {
                 let token = self.token;
                 let signalled = self.signalled.clone();
                 let r = self.receiver.shared.recv(
                     true,
-                    || Hook::trigger(SelectSignal(thread::current(), token, AtomicBool::new(false), signalled)),
+                    || {
+                        Hook::trigger(SelectSignal(
+                            thread::current(),
+                            token,
+                            AtomicBool::new(false),
+                            signalled,
+                        ))
+                    },
                     // Always runs
-                    |h| { self.hook = Some(h); Err(TryRecvTimeoutError::Timeout) },
+                    |h| {
+                        self.hook = Some(h);
+                        Err(TryRecvTimeoutError::Timeout)
+                    },
                 );
 
                 if self.hook.is_none() {
@@ -233,9 +276,19 @@ impl<'a, T> Selector<'a, T> {
                 if let Some(hook) = self.hook.take() {
                     // Remove hook
                     let hook: Arc<Hook<U, dyn Signal>> = hook;
-                    wait_lock(&self.receiver.shared.chan).waiting.retain(|s| !Arc::ptr_eq(s, &hook));
+                    wait_lock(&self.receiver.shared.chan)
+                        .waiting
+                        .retain(|s| !Arc::ptr_eq(s, &hook));
                     // If we were woken, but never polled, wake up another
-                    if !self.received && hook.signal().as_any().downcast_ref::<SelectSignal>().unwrap().2.load(Ordering::SeqCst) {
+                    if !self.received
+                        && hook
+                            .signal()
+                            .as_any()
+                            .downcast_ref::<SelectSignal>()
+                            .unwrap()
+                            .2
+                            .load(Ordering::SeqCst)
+                    {
                         wait_lock(&self.receiver.shared.chan).try_wake_receiver_if_pending();
                     }
                 }
@@ -259,8 +312,7 @@ impl<'a, T> Selector<'a, T> {
     fn wait_inner(mut self, deadline: Option<Instant>) -> Option<T> {
         #[cfg(feature = "eventual-fairness")]
         {
-            use rand::prelude::*;
-            self.next_poll = thread_rng().gen_range(0, self.selections.len());
+            self.next_poll = nanorand::WyRand::new().generate_range(0, self.selections.len());
         }
 
         let res = 'outer: loop {
@@ -332,7 +384,8 @@ impl<'a, T> Selector<'a, T> {
     /// `eventual-fairness` feature flag is enabled, this method is fair and will handle a random event of those that
     /// are ready.
     pub fn wait_timeout(self, dur: Duration) -> Result<T, SelectError> {
-        self.wait_inner(Some(Instant::now() + dur)).ok_or(SelectError::Timeout)
+        self.wait_inner(Some(Instant::now() + dur))
+            .ok_or(SelectError::Timeout)
     }
 
     /// Wait until one of the events associated with this [`Selector`] has completed or the deadline has been reached.
