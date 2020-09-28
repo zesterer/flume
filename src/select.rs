@@ -76,6 +76,8 @@ pub struct Selector<'a, T: 'a> {
     selections: Vec<Box<dyn Selection<'a, T> + 'a>>,
     next_poll: usize,
     signalled: Arc<Spinlock<VecDeque<Token>>>,
+    #[cfg(feature = "eventual-fairness")]
+    rng: nanorand::WyRand,
     phantom: PhantomData<*const ()>,
 }
 
@@ -99,6 +101,8 @@ impl<'a, T> Selector<'a, T> {
             next_poll: 0,
             signalled: Arc::default(),
             phantom: PhantomData::default(),
+            #[cfg(feature = "eventual-fairness")]
+            rng: nanorand::WyRand::new(),
         }
     }
 
@@ -312,7 +316,7 @@ impl<'a, T> Selector<'a, T> {
     fn wait_inner(mut self, deadline: Option<Instant>) -> Option<T> {
         #[cfg(feature = "eventual-fairness")]
         {
-            self.next_poll = nanorand::WyRand::new().generate_range(0, self.selections.len());
+            self.next_poll = self.rng.generate_range(0, self.selections.len());
         }
 
         let res = 'outer: loop {
