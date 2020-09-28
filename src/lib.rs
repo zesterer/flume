@@ -52,7 +52,7 @@ impl<T> fmt::Display for SendError<T> {
     }
 }
 
-impl<T> std::error::Error for SendError<T> where T: fmt::Debug {}
+impl<T> std::error::Error for SendError<T> {}
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender.
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -79,7 +79,7 @@ impl<T> fmt::Display for TrySendError<T> {
     }
 }
 
-impl<T> std::error::Error for TrySendError<T> where T: fmt::Debug {}
+impl<T> std::error::Error for TrySendError<T> {}
 
 /// An error that may be emitted when sending a value into a channel on a sender with a timeout.
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -103,7 +103,7 @@ impl<T> fmt::Display for SendTimeoutError<T> {
     }
 }
 
-impl<T> std::error::Error for SendTimeoutError<T> where T: fmt::Debug {}
+impl<T> std::error::Error for SendTimeoutError<T> {}
 
 enum TrySendTimeoutError<T> {
     Full(T),

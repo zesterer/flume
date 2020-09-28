@@ -354,3 +354,55 @@ fn select_general() {
 
     t.join().unwrap();
 }
+
+struct MessageWithoutDebug(u32);
+
+#[test]
+// This is a 'does it build' test, to make sure that the error types can turn
+// into a std::error::Error without requiring the payload (which is not used
+// there) to impl Debug.
+fn std_error_without_debug() {
+    let (tx, rx) = unbounded::<MessageWithoutDebug>();
+
+    match tx.send(MessageWithoutDebug(1)) {
+        Ok(_) => {}
+        Err(e) => {
+            let _std_err: &dyn std::error::Error = &e;
+        }
+    }
+
+    match rx.recv() {
+        Ok(_) => {}
+        Err(e) => {
+            let _std_err: &dyn std::error::Error = &e;
+        }
+    }
+
+    match tx.try_send(MessageWithoutDebug(2)) {
+        Ok(_) => {}
+        Err(e) => {
+            let _std_err: &dyn std::error::Error = &e;
+        }
+    }
+
+    match rx.try_recv() {
+        Ok(_) => {}
+        Err(e) => {
+            let _std_err: &dyn std::error::Error = &e;
+        }
+    }
+
+    match tx.send_timeout(MessageWithoutDebug(3), Duration::from_secs(1000000)) {
+        Ok(_) => {}
+        Err(e) => {
+            let _std_err: &dyn std::error::Error = &e;
+        }
+    }
+
+    match rx.recv_timeout(Duration::from_secs(10000000)) {
+        Ok(_) => {}
+        Err(e) => {
+            let _std_err: &dyn std::error::Error = &e;
+        }
+    }
+}
