@@ -1,15 +1,16 @@
 #[cfg(feature = "async")]
 use {
     flume::*,
-    futures::{stream::FuturesUnordered, StreamExt, TryFutureExt},
+    futures::{stream::FuturesUnordered, StreamExt, TryFutureExt, Future},
+    futures::task::{Context, Waker, Poll},
     async_std::prelude::FutureExt,
-    std::time::Duration
+    std::{time::Duration, sync::{atomic::{AtomicUsize, Ordering}, Arc}},
 };
 
 #[cfg(feature = "async")]
 #[test]
 fn r#async_recv() {
-    let (tx, mut rx) = unbounded();
+    let (tx, rx) = unbounded();
 
     let t = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -26,7 +27,7 @@ fn r#async_recv() {
 #[cfg(feature = "async")]
 #[test]
 fn r#async_send() {
-    let (tx, mut rx) = bounded(1);
+    let (tx, rx) = bounded(1);
 
     let t = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -43,7 +44,7 @@ fn r#async_send() {
 #[cfg(feature = "async")]
 #[test]
 fn r#async_recv_disconnect() {
-    let (tx, mut rx) = bounded::<i32>(0);
+    let (tx, rx) = bounded::<i32>(0);
 
     let t = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -60,7 +61,7 @@ fn r#async_recv_disconnect() {
 #[cfg(feature = "async")]
 #[test]
 fn r#async_send_disconnect() {
-    let (tx, mut rx) = bounded(0);
+    let (tx, rx) = bounded(0);
 
     let t = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -77,7 +78,7 @@ fn r#async_send_disconnect() {
 #[cfg(feature = "async")]
 #[test]
 fn r#async_recv_drop_recv() {
-    let (tx, mut rx) = bounded::<i32>(10);
+    let (tx, rx) = bounded::<i32>(10);
 
     let recv_fut = rx.recv_async();
 
@@ -168,7 +169,79 @@ async fn parallel_async_receivers() {
     recv_fut
         .timeout(Duration::from_secs(5))
         .map_err(|_| panic!("Receive timed out!"))
-        .await;
+        .await
+        .unwrap();
 
     println!("recv end");
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn change_waker() {
+    let (tx, rx) = flume::bounded(1);
+    tx.send(()).unwrap();
+
+    struct DebugWaker(Arc<AtomicUsize>, Waker);
+
+    impl DebugWaker {
+        fn new() -> Self {
+            let woken = Arc::new(AtomicUsize::new(0));
+            let woken_cloned = woken.clone();
+            let waker = waker_fn::waker_fn(move || {
+                woken.fetch_add(1, Ordering::SeqCst);
+            });
+            DebugWaker(woken_cloned, waker)
+        }
+
+        fn woken(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+
+        fn ctx(&self) -> Context {
+            Context::from_waker(&self.1)
+        }
+    }
+
+    // Check that the waker is correctly updated when sending tasks change their wakers
+    {
+        let send_fut = tx.send_async(());
+        futures::pin_mut!(send_fut);
+
+        let (waker1, waker2) = (DebugWaker::new(), DebugWaker::new());
+
+        // Set the waker to waker1
+        assert_eq!(send_fut.as_mut().poll(&mut waker1.ctx()), Poll::Pending);
+
+        // Change the waker to waker2
+        assert_eq!(send_fut.poll(&mut waker2.ctx()), Poll::Pending);
+
+        // Wake the future
+        rx.recv().unwrap();
+
+        // Check that waker2 was woken and waker1 was not
+        assert_eq!(waker1.woken(), 0);
+        assert_eq!(waker2.woken(), 1);
+    }
+
+    // Check that the waker is correctly updated when receiving tasks change their wakers
+    {
+        rx.recv().unwrap();
+        let recv_fut = rx.recv_async();
+        futures::pin_mut!(recv_fut);
+
+        let (waker1, waker2) = (DebugWaker::new(), DebugWaker::new());
+
+        // Set the waker to waker1
+        assert_eq!(recv_fut.as_mut().poll(&mut waker1.ctx()), Poll::Pending);
+
+        // Change the waker to waker2
+        assert_eq!(recv_fut.poll(&mut waker2.ctx()), Poll::Pending);
+
+        // Wake the future
+        tx.send(()).unwrap();
+
+        // Check that waker2 was woken and waker1 was not
+        assert_eq!(waker1.woken(), 0);
+        assert_eq!(waker2.woken(), 1);
+    }
 }

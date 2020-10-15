@@ -12,7 +12,7 @@ use futures_core::{stream::{Stream, FusedStream}, future::FusedFuture};
 use futures_sink::Sink;
 
 struct AsyncSignal {
-    waker: Waker,
+    waker: Spinlock<Waker>,
     woken: AtomicBool,
     stream: bool,
 }
@@ -20,7 +20,7 @@ struct AsyncSignal {
 impl AsyncSignal {
     fn new(cx: &Context, stream: bool) -> Self {
         AsyncSignal {
-            waker: cx.waker().clone(),
+            waker: Spinlock::new(cx.waker().clone()),
             woken: AtomicBool::new(false),
             stream,
         }
@@ -30,7 +30,7 @@ impl AsyncSignal {
 impl Signal for AsyncSignal {
     fn fire(&self) -> bool {
         self.woken.store(true, Ordering::SeqCst);
-        self.waker.wake_by_ref();
+        self.waker.lock().wake_by_ref();
         self.stream
     }
 
@@ -38,6 +38,19 @@ impl Signal for AsyncSignal {
     fn as_ptr(&self) -> *const () { self as *const _ as *const () }
 }
 
+impl<T> Hook<T, AsyncSignal> {
+    fn update_waker(&self, cx_waker: &Waker) {
+        if !self.1.waker.lock().will_wake(cx_waker) {
+            *self.1.waker.lock() = cx_waker.clone();
+
+            // Avoid the edge case where the waker was woken just before the wakers were
+            // swapped.
+            if self.1.woken.load(Ordering::SeqCst) {
+                cx_waker.wake_by_ref();
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 enum OwnedOrRef<'a, T> {
@@ -107,6 +120,8 @@ pub struct SendFuture<'a, T: Unpin> {
 }
 
 impl<'a, T: Unpin> SendFuture<'a, T> {
+    /// Reset the hook, clearing it and removing it from the waiting sender's queue. This is called
+    /// on drop and just before `start_send` in the `Sink` implementation.
     fn reset_hook(&mut self) {
         if let Some(SendState::QueuedItem(hook)) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
@@ -140,6 +155,7 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
                     },
                 }
             } else {
+                hook.update_waker(cx.waker());
                 Poll::Pending
             }
         } else {
@@ -257,6 +273,9 @@ impl<'a, T> RecvFut<'a, T> {
         }
     }
 
+    /// Reset the hook, clearing it and removing it from the waiting receivers queue and waking
+    /// another receiver if this receiver has been woken, so as not to cause any missed wakeups.
+    /// This is called on drop and after a new item is received in `Stream::poll_next`.
     fn reset_hook(&mut self) {
         if let Some(hook) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
@@ -283,6 +302,7 @@ impl<'a, T> RecvFut<'a, T> {
                 Poll::Ready(Err(RecvError::Disconnected))
             } else {
                 let hook = self.hook.as_ref().map(Arc::clone).unwrap();
+                hook.update_waker(cx.waker());
                 wait_lock(&self.receiver.shared.chan).waiting.push_back(hook);
                 Poll::Pending
             }
