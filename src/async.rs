@@ -62,7 +62,7 @@ impl<T: Unpin> Sender<T> {
     pub fn send_async(&self, item: T) -> SendFuture<T> {
         SendFuture {
             sender: OwnedOrRef::Ref(&self),
-            hook: Some(Err(item)),
+            hook: Some(SendState::NotYetSent(item)),
         }
     }
 
@@ -71,7 +71,7 @@ impl<T: Unpin> Sender<T> {
     pub fn into_send_async(self, item: T) -> SendFuture<'static, T> {
         SendFuture {
             sender: OwnedOrRef::Owned(self),
-            hook: Some(Err(item)),
+            hook: Some(SendState::NotYetSent(item)),
         }
     }
 
@@ -94,16 +94,21 @@ impl<T: Unpin> Sender<T> {
     }
 }
 
+enum SendState<T> {
+    NotYetSent(T),
+    QueuedItem(Arc<Hook<T, AsyncSignal>>),
+}
+
 /// A future that sends a value into a channel.
 pub struct SendFuture<'a, T: Unpin> {
     sender: OwnedOrRef<'a, Sender<T>>,
     // Only none after dropping
-    hook: Option<Result<Arc<Hook<T, AsyncSignal>>, T>>,
+    hook: Option<SendState<T>>,
 }
 
 impl<'a, T: Unpin> SendFuture<'a, T> {
     fn reset_hook(&mut self) {
-        if let Some(Ok(hook)) = self.hook.take() {
+        if let Some(SendState::QueuedItem(hook)) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
             wait_lock(&self.sender.shared.chan).sending
                 .as_mut()
@@ -123,13 +128,13 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
     type Output = Result<(), SendError<T>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(Ok(hook)) = self.hook.as_ref() {
+        if let Some(SendState::QueuedItem(hook)) = self.hook.as_ref() {
             if hook.is_empty() {
                 Poll::Ready(Ok(()))
             } else if self.sender.shared.is_disconnected() {
                 match self.hook.take().unwrap() {
-                    Err(item) => Poll::Ready(Err(SendError(item))),
-                    Ok(hook) => match hook.try_take() {
+                    SendState::NotYetSent(item) => Poll::Ready(Err(SendError(item))),
+                    SendState::QueuedItem(hook) => match hook.try_take() {
                         Some(item) => Poll::Ready(Err(SendError(item))),
                         None => Poll::Ready(Ok(())),
                     },
@@ -144,8 +149,8 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
             shared.send(
                 // item
                 match this_hook.take().unwrap() {
-                    Err(item) => item,
-                    Ok(_) => return Poll::Ready(Ok(())),
+                    SendState::NotYetSent(item) => item,
+                    SendState::QueuedItem(_) => return Poll::Ready(Ok(())),
                 },
                 // should_block
                 true,
@@ -153,7 +158,7 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
                 |msg| Hook::slot(Some(msg), AsyncSignal::new(cx, false)),
                 // do_block
                 |hook| {
-                    *this_hook = Some(Ok(hook));
+                    *this_hook = Some(SendState::QueuedItem(hook));
                     Poll::Pending
                 }
             )
@@ -189,7 +194,7 @@ impl<'a, T: Unpin> Sink<T> for SendSink<'a, T> {
 
     fn start_send(mut self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
         self.0.reset_hook();
-        self.0.hook = Some(Err(item));
+        self.0.hook = Some(SendState::NotYetSent(item));
 
         Ok(())
     }
