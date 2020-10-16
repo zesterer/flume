@@ -158,7 +158,7 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
                 hook.update_waker(cx.waker());
                 Poll::Pending
             }
-        } else {
+        } else if let Some(SendState::NotYetSent(_)) = self.hook {
             let mut_self = self.get_mut();
             let (shared, this_hook) = (&mut_self.sender.shared, &mut mut_self.hook);
 
@@ -182,6 +182,8 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
                     TrySendTimeoutError::Disconnected(msg) => SendError(msg),
                     _ => unreachable!(),
                 }))
+        } else { // Nothing to do
+            Poll::Ready(Ok(()))
         }
     }
 }
