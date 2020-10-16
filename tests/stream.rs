@@ -5,6 +5,7 @@ use {
     async_std::prelude::FutureExt,
     std::time::Duration,
 };
+use futures::{stream, Stream};
 
 #[cfg(feature = "async")]
 #[test]
@@ -148,7 +149,8 @@ async fn parallel_streams_and_async_recv() {
     recv_fut
         .timeout(Duration::from_secs(5))
         .map_err(|_| panic!("Receive timed out!"))
-        .await;
+        .await
+        .unwrap();
 }
 
 #[cfg(feature = "async")]
@@ -195,4 +197,38 @@ fn stream_no_double_wake() {
 
     // verify that stream is only woken up once.
     assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn stream_forward_issue_55() { // https://github.com/zesterer/flume/issues/55
+    fn dummy_stream() -> impl Stream<Item = usize> {
+        stream::unfold(0, |count| async move {
+            if count < 1000 {
+                Some((count, count + 1))
+            } else {
+                None
+            }
+        })
+    }
+
+    let (send_task, recv_task) = {
+        use futures::SinkExt;
+        let (tx, rx) = flume::bounded(100);
+
+        let send_task = dummy_stream()
+            .map(|i| Ok(i))
+            .forward(tx.into_sink().sink_map_err(|e| {
+                panic!("send error:{:#?}", e)
+            }));
+
+        let recv_task = rx
+            .into_stream()
+            .for_each(|item| async move {});
+        (send_task, recv_task)
+    };
+
+    let jh = async_std::task::spawn(send_task);
+    async_std::task::block_on(recv_task);
+    jh.await.unwrap();
 }
