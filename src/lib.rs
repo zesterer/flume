@@ -36,7 +36,8 @@ use std::{
 use spinning_top::{Spinlock, SpinlockGuard};
 use crate::signal::{Signal, SyncSignal};
 
-/// An error that may be emitted when attempting to send a value into a channel on a sender.
+/// An error that may be emitted when attempting to send a value into a channel on a sender when
+/// all receivers are dropped.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct SendError<T>(pub T);
 
@@ -54,7 +55,8 @@ impl<T> fmt::Display for SendError<T> {
 
 impl<T> std::error::Error for SendError<T> {}
 
-/// An error that may be emitted when attempting to send a value into a channel on a sender.
+/// An error that may be emitted when attempting to send a value into a channel on a sender when
+/// the channel is full or all receivers are dropped.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum TrySendError<T> {
     Full(T),
@@ -81,7 +83,8 @@ impl<T> fmt::Display for TrySendError<T> {
 
 impl<T> std::error::Error for TrySendError<T> {}
 
-/// An error that may be emitted when sending a value into a channel on a sender with a timeout.
+/// An error that may be emitted when sending a value into a channel on a sender with a timeout when
+/// the send operation times out or all receivers are dropped.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum SendTimeoutError<T> {
     Timeout(T),
@@ -111,7 +114,8 @@ enum TrySendTimeoutError<T> {
     Timeout(T),
 }
 
-/// An error that may be emitted when attempting to wait for a value on a receiver.
+/// An error that may be emitted when attempting to wait for a value on a receiver when all senders
+/// are dropped and there are no more messages in the channel.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RecvError {
     Disconnected,
@@ -127,7 +131,9 @@ impl fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
-/// An error that may be emitted when attempting to fetch a value on a receiver.
+/// An error that may be emitted when attempting to fetch a value on a receiver when there are no
+/// messages in the channel. If there are no messages in the channel and all senders are dropped,
+/// then `TryRecvError::Disconnected` will be returned.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TryRecvError {
     Empty,
@@ -145,7 +151,9 @@ impl fmt::Display for TryRecvError {
 
 impl std::error::Error for TryRecvError {}
 
-/// An error that may be emitted when attempting to wait for a value on a receiver with a timeout.
+/// An error that may be emitted when attempting to wait for a value on a receiver with a timeout
+/// when the receive operation times out or all senders are dropped and there are no values left
+/// in the channel.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RecvTimeoutError {
     Timeout,
