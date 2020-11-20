@@ -561,8 +561,8 @@ pub struct Sender<T> {
 }
 
 impl<T> Sender<T> {
-    /// Attempt to send a value into the channel. If the channel is bounded and full, or the
-    /// receiver has been dropped, an error is returned. If the channel associated with this
+    /// Attempt to send a value into the channel. If the channel is bounded and full, or all
+    /// receivers have been dropped, an error is returned. If the channel associated with this
     /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
         self.shared.send_sync(msg, None).map_err(|err| match err {
@@ -572,8 +572,9 @@ impl<T> Sender<T> {
         })
     }
 
-    /// Send a value into the channel, returning an error if the channel receiver has
-    /// been dropped. If the channel is bounded and is full, this method will block.
+    /// Send a value into the channel, returning an error if all receivers have been dropped.
+    /// If the channel is bounded and is full, this method will block until space is available
+    /// or all receivers have been dropped.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         self.shared.send_sync(msg, Some(None)).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendError(msg),
@@ -581,9 +582,10 @@ impl<T> Sender<T> {
         })
     }
 
-    /// Send a value into the channel, returning an error if the channel receiver has
-    /// been dropped or the deadline has passed. If the channel is bounded and is full, this method
-    /// will block.
+    /// Send a value into the channel, returning an error if all receivers have been dropped
+    /// or the deadline has passed. If the channel is bounded and is full, this method will
+    /// block until space is available, the deadline is reached, or all receivers have been
+    /// dropped.
     pub fn send_deadline(&self, msg: T, deadline: Instant) -> Result<(), SendTimeoutError<T>> {
         self.shared.send_sync(msg, Some(Some(deadline))).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendTimeoutError::Disconnected(msg),
@@ -592,9 +594,10 @@ impl<T> Sender<T> {
         })
     }
 
-    /// Send a value into the channel, returning an error if the channel receiver has
-    /// been dropped or the timeout has expired. If the channel is bounded and is full, this method
-    /// will block.
+    /// Send a value into the channel, returning an error if all receivers have been dropped
+    /// or the timeout has expired. If the channel is bounded and is full, this method will
+    /// block until space is available, the timeout has expired, or all receivers have been
+    /// dropped.
     pub fn send_timeout(&self, msg: T, dur: Duration) -> Result<(), SendTimeoutError<T>> {
         self.send_deadline(msg, Instant::now().checked_add(dur).unwrap())
     }
@@ -652,13 +655,17 @@ impl<T> Drop for Sender<T> {
 }
 
 /// The receiving end of a channel.
+///
+/// Note: Cloning the receiver *does not* turn this channel into a broadcast channel.
+/// Each message will only be received by a single receiver. This is useful for
+/// implementing work stealing for concurrent programs.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
 }
 
 impl<T> Receiver<T> {
     /// Attempt to fetch an incoming value from the channel associated with this receiver,
-    /// returning an error if the channel is empty or all channel senders have been dropped.
+    /// returning an error if the channel is empty.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.shared.recv_sync(None).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => TryRecvError::Disconnected,
@@ -668,7 +675,7 @@ impl<T> Receiver<T> {
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
-    /// error if all channel senders have been dropped.
+    /// error if all senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
         self.shared.recv_sync(Some(None)).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
@@ -677,7 +684,7 @@ impl<T> Receiver<T> {
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
-    /// error if all channel senders have been dropped or the deadline has passed.
+    /// error if all senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
         self.shared.recv_sync(Some(Some(deadline))).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
@@ -687,13 +694,13 @@ impl<T> Receiver<T> {
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
-    /// error if all channel senders have been dropped or the timeout has expired.
+    /// error if all senders have been dropped or the timeout has expired.
     pub fn recv_timeout(&self, dur: Duration) -> Result<T, RecvTimeoutError> {
         self.recv_deadline(Instant::now().checked_add(dur).unwrap())
     }
 
-    /// A blocking iterator over the values received on the channel that finishes iteration when
-    /// all receivers of the channel have been dropped.
+    /// Create a blocking iterator over the values received on the channel that finishes iteration
+    /// when all receivers have been dropped.
     pub fn iter(&self) -> Iter<T> {
         Iter { receiver: &self }
     }
@@ -747,6 +754,10 @@ impl<T> Clone for Receiver<T> {
     /// Clone this receiver. [`Receiver`] acts as a handle to the ending a channel. Remaining
     /// channel contents will only be cleaned up when all senders and the receiver have been
     /// dropped.
+    ///
+    /// Note: Cloning the receiver *does not* turn this channel into a broadcast channel.
+    /// Each message will only be received by a single receiver. This is useful for
+    /// implementing work stealing for concurrent programs.
     fn clone(&self) -> Self {
         self.shared.receiver_count.fetch_add(1, Ordering::Relaxed);
         Self { shared: self.shared.clone() }

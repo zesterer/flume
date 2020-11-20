@@ -70,8 +70,9 @@ impl<'a, T> Deref for OwnedOrRef<'a, T> {
 }
 
 impl<T: Unpin> Sender<T> {
-    /// Asynchronously send a value into the channel, returning an error if the channel receiver has
-    /// been dropped. If the channel is bounded and is full, this method will yield to the async runtime.
+    /// Asynchronously send a value into the channel, returning an error if all receivers have been
+    /// dropped. If the channel is bounded and is full, the returned future will yield to the async
+    /// runtime.
     pub fn send_async(&self, item: T) -> SendFuture<T> {
         SendFuture {
             sender: OwnedOrRef::Ref(&self),
@@ -79,8 +80,9 @@ impl<T: Unpin> Sender<T> {
         }
     }
 
-    /// Clones the channel and asynchronously send a value, returning an error if the channel receiver has
-    /// been dropped. If the channel is bounded and is full, this method will yield to the async runtime.
+    /// Convert this sender into a future that asynchronously sends a single message into the channel,
+    /// returning an error if all receivers have been dropped. If the channel is bounded and is full,
+    /// this future will yield to the async runtime.
     pub fn into_send_async(self, item: T) -> SendFuture<'static, T> {
         SendFuture {
             sender: OwnedOrRef::Owned(self),
@@ -88,8 +90,8 @@ impl<T: Unpin> Sender<T> {
         }
     }
 
-    /// Use this channel as an asynchronous item sink. The returned stream holds a reference
-    /// to the receiver.
+    /// Create an asynchronous sink that uses this sender to asynchronously send messages into the
+    /// channel. The sender will continue to be usable after the sink has been dropped.
     pub fn sink(&self) -> SendSink<'_, T> {
         SendSink(SendFuture {
             sender: OwnedOrRef::Ref(&self),
@@ -97,8 +99,7 @@ impl<T: Unpin> Sender<T> {
         })
     }
 
-    /// Use this channel as an asynchronous item sink. The returned stream has a `'static`
-    /// lifetime.
+    /// Convert this sender into a sink that allows asynchronously sending messages into the channel.
     pub fn into_sink(self) -> SendSink<'static, T> {
         SendSink(SendFuture {
             sender: OwnedOrRef::Owned(self),
@@ -236,26 +237,26 @@ impl<'a, T: Unpin> Clone for SendSink<'a, T> {
 }
 
 impl<T> Receiver<T> {
-    /// Asynchronously wait for an incoming value from the channel associated with this receiver,
-    /// returning an error if all channel senders have been dropped.
+    /// Asynchronously receive a value from the channel, returning an error if all senders have been
+    /// dropped. If the channel is empty, the returned future will yield to the async runtime.
     pub fn recv_async(&self) -> RecvFut<'_, T> {
         RecvFut::new(OwnedOrRef::Ref(self))
     }
 
-    /// Clones the channel and asynchronously wait for an incoming value from the channel associated
-    /// with this receiver, returning an error if all channel senders have been dropped.
+    /// Convert this receiver into a future that asynchronously receives a single message from the
+    /// channel, returning an error if all senders have been dropped. If the channel is empty, this
+    /// future will yield to the async runtime.
     pub fn into_recv_async(self) -> RecvFut<'static, T> {
         RecvFut::new(OwnedOrRef::Owned(self))
     }
 
-    /// Use this channel as an asynchronous stream of items. The returned stream holds a reference
-    /// to the receiver.
+    /// Create an asynchronous stream that uses this receiver to asynchronously receive messages
+    /// from the channel. The receiver will continue to be usable after the stream has been dropped.
     pub fn stream(&self) -> RecvStream<'_, T> {
         RecvStream(RecvFut::new(OwnedOrRef::Ref(self)))
     }
 
-    /// Convert this channel into an asynchronous stream of items. The returned stream has a `'static`
-    /// lifetime.
+    /// Convert this receiver into a stream that allows asynchronously receiving messages from the channel.
     pub fn into_stream(self) -> RecvStream<'static, T> {
         RecvStream(RecvFut::new(OwnedOrRef::Owned(self)))
     }
