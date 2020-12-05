@@ -4,6 +4,18 @@
 //!
 //! *"Do not communicate by sharing memory; instead, share memory by communicating."*
 //!
+//! ## Why Flume?
+//!
+//! - **Featureful**: Unbounded, bounded and rendezvous queues
+//! - **Fast**: Always faster than `std::sync::mpsc` and sometimes `crossbeam-channel`
+//! - **Safe**: No `unsafe` code anywhere in the codebase!
+//! - **Flexible**: `Sender` and `Receiver` both implement `Send + Sync + Clone`
+//! - **Familiar**: Drop-in replacement for `std::sync::mpsc`
+//! - **Capable**: Additional features like MPMC support and send timeouts/deadlines
+//! - **Simple**: Few dependencies, minimal codebase, fast to compile
+//! - **Asynchronous**: `async` support, including mix 'n match with sync code
+//! - **Ergonomic**: Powerful `select`-like interface
+//!
 //! ## Example
 //!
 //! ```
