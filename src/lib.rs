@@ -574,7 +574,8 @@ impl<T> Sender<T> {
 
     /// Send a value into the channel, returning an error if all receivers have been dropped.
     /// If the channel is bounded and is full, this method will block until space is available
-    /// or all receivers have been dropped.
+    /// or all receivers have been dropped. If the channel is unbounded, this method will not
+    /// block.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         self.shared.send_sync(msg, Some(None)).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendError(msg),

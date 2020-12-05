@@ -73,8 +73,11 @@ impl<T: Unpin> Sender<T> {
     /// Asynchronously send a value into the channel, returning an error if all receivers have been
     /// dropped. If the channel is bounded and is full, the returned future will yield to the async
     /// runtime.
-    pub fn send_async(&self, item: T) -> SendFuture<T> {
-        SendFuture {
+    ///
+    /// In the current implementation, the returned future will not yield to the async runtime if the
+    /// channel is unbounded. This may change in later versions.
+    pub fn send_async(&self, item: T) -> SendFut<T> {
+        SendFut {
             sender: OwnedOrRef::Ref(&self),
             hook: Some(SendState::NotYetSent(item)),
         }
@@ -83,8 +86,11 @@ impl<T: Unpin> Sender<T> {
     /// Convert this sender into a future that asynchronously sends a single message into the channel,
     /// returning an error if all receivers have been dropped. If the channel is bounded and is full,
     /// this future will yield to the async runtime.
-    pub fn into_send_async(self, item: T) -> SendFuture<'static, T> {
-        SendFuture {
+    ///
+    /// In the current implementation, the returned future will not yield to the async runtime if the
+    /// channel is unbounded. This may change in later versions.
+    pub fn into_send_async(self, item: T) -> SendFut<'static, T> {
+        SendFut {
             sender: OwnedOrRef::Owned(self),
             hook: Some(SendState::NotYetSent(item)),
         }
@@ -92,16 +98,22 @@ impl<T: Unpin> Sender<T> {
 
     /// Create an asynchronous sink that uses this sender to asynchronously send messages into the
     /// channel. The sender will continue to be usable after the sink has been dropped.
+    ///
+    /// In the current implementation, the returned sink will not yield to the async runtime if the
+    /// channel is unbounded. This may change in later versions.
     pub fn sink(&self) -> SendSink<'_, T> {
-        SendSink(SendFuture {
+        SendSink(SendFut {
             sender: OwnedOrRef::Ref(&self),
             hook: None,
         })
     }
 
     /// Convert this sender into a sink that allows asynchronously sending messages into the channel.
+    ///
+    /// In the current implementation, the returned sink will not yield to the async runtime if the
+    /// channel is unbounded. This may change in later versions.
     pub fn into_sink(self) -> SendSink<'static, T> {
-        SendSink(SendFuture {
+        SendSink(SendFut {
             sender: OwnedOrRef::Owned(self),
             hook: None,
         })
@@ -114,13 +126,13 @@ enum SendState<T> {
 }
 
 /// A future that sends a value into a channel.
-pub struct SendFuture<'a, T: Unpin> {
+pub struct SendFut<'a, T: Unpin> {
     sender: OwnedOrRef<'a, Sender<T>>,
     // Only none after dropping
     hook: Option<SendState<T>>,
 }
 
-impl<'a, T: Unpin> SendFuture<'a, T> {
+impl<'a, T: Unpin> SendFut<'a, T> {
     /// Reset the hook, clearing it and removing it from the waiting sender's queue. This is called
     /// on drop and just before `start_send` in the `Sink` implementation.
     fn reset_hook(&mut self) {
@@ -134,13 +146,13 @@ impl<'a, T: Unpin> SendFuture<'a, T> {
     }
 }
 
-impl<'a, T: Unpin> Drop for SendFuture<'a, T> {
+impl<'a, T: Unpin> Drop for SendFut<'a, T> {
     fn drop(&mut self) {
         self.reset_hook()
     }
 }
 
-impl<'a, T: Unpin> Future for SendFuture<'a, T> {
+impl<'a, T: Unpin> Future for SendFut<'a, T> {
     type Output = Result<(), SendError<T>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -189,14 +201,14 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
     }
 }
 
-impl<'a, T: Unpin> FusedFuture for SendFuture<'a, T> {
+impl<'a, T: Unpin> FusedFuture for SendFut<'a, T> {
     fn is_terminated(&self) -> bool {
         self.sender.shared.is_disconnected()
     }
 }
 
 /// A sink that allows sending values into a channel.
-pub struct SendSink<'a, T: Unpin>(SendFuture<'a, T>);
+pub struct SendSink<'a, T: Unpin>(SendFut<'a, T>);
 
 impl<'a, T: Unpin> SendSink<'a, T> {
     pub fn is_disconnected(&self) -> bool {
@@ -229,7 +241,7 @@ impl<'a, T: Unpin> Sink<T> for SendSink<'a, T> {
 
 impl<'a, T: Unpin> Clone for SendSink<'a, T> {
     fn clone(&self) -> SendSink<'a, T> {
-        SendSink(SendFuture {
+        SendSink(SendFut {
             sender: self.0.sender.clone(),
             hook: None
         })

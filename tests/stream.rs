@@ -10,7 +10,7 @@ use futures::{stream, Stream};
 #[cfg(feature = "async")]
 #[test]
 fn stream_recv() {
-    let (tx, mut rx) = unbounded();
+    let (tx, rx) = unbounded();
 
     let t = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -31,7 +31,7 @@ fn stream_recv() {
 #[cfg(feature = "async")]
 #[test]
 fn stream_recv_disconnect() {
-    let (tx, mut rx) = bounded::<i32>(0);
+    let (tx, rx) = bounded::<i32>(0);
 
     let t = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -48,7 +48,7 @@ fn stream_recv_disconnect() {
 #[cfg(feature = "async")]
 #[test]
 fn stream_recv_drop_recv() {
-    let (tx, mut rx) = bounded::<i32>(10);
+    let (tx, rx) = bounded::<i32>(10);
 
     let rx2 = rx.clone();
     let mut stream = rx.into_stream();
@@ -78,6 +78,24 @@ fn stream_recv_drop_recv() {
 }
 
 #[cfg(feature = "async")]
+#[test]
+fn r#stream_drop_send_disconnect() {
+    let (tx, rx) = bounded::<i32>(1);
+
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        drop(tx);
+    });
+
+    async_std::task::block_on(async {
+        let mut stream = rx.into_stream();
+        assert_eq!(stream.next().await, None);
+    });
+
+    t.join().unwrap();
+}
+
+#[cfg(feature = "async")]
 #[async_std::test]
 async fn stream_send_1_million_no_drop_or_reorder() {
     #[derive(Debug)]
@@ -88,7 +106,7 @@ async fn stream_send_1_million_no_drop_or_reorder() {
         ReturnCount,
     }
 
-    let (tx, mut rx) = unbounded();
+    let (tx, rx) = unbounded();
 
     let t = async_std::task::spawn(async move {
         let mut count = 0u64;
@@ -163,7 +181,7 @@ fn stream_no_double_wake() {
     use futures::task::{waker, ArcWake};
     use futures::Stream;
 
-    let mut count = Arc::new(AtomicUsize::new(0));
+    let count = Arc::new(AtomicUsize::new(0));
 
     // all this waker does is count how many times it is called
     struct CounterWaker {
@@ -184,11 +202,11 @@ fn stream_no_double_wake() {
     let cx = &mut Context::from_waker(&w);
 
     // create unbounded channel
-    let (tx, mut rx) = unbounded::<()>();
+    let (tx, rx) = unbounded::<()>();
     let mut stream = rx.stream();
 
     // register waker with stream
-    Pin::new(&mut stream).poll_next(cx);
+    let _ = Pin::new(&mut stream).poll_next(cx);
 
     // send multiple items
     tx.send(()).unwrap();
