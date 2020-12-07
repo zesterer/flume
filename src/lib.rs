@@ -909,8 +909,8 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
 ///
 /// Like `std::sync::mpsc`, `flume` supports 'rendezvous' channels. A bounded queue with a maximum capacity of zero
 /// will block senders until a receiver is available to take the value. You can imagine a rendezvous channel as a
-/// 'Checkpoint Charlie'-style location at which senders and receivers perform a handshake and transfer ownership of a
-/// value.
+/// ['Glienicke Bridge'](https://en.wikipedia.org/wiki/Glienicke_Bridge)-style location at which senders and receivers
+/// perform a handshake and transfer ownership of a value.
 ///
 /// # Examples
 /// ```
