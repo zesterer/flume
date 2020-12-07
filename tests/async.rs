@@ -104,23 +104,6 @@ fn r#async_recv_drop_recv() {
 }
 
 #[cfg(feature = "async")]
-#[test]
-fn r#async_drop_send_disconnect() {
-    let (tx, rx) = bounded::<i32>(1);
-
-    let t = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        drop(tx);
-    });
-
-    async_std::task::block_on(async {
-        assert_eq!(rx.recv_async().await, Err(RecvError::Disconnected));
-    });
-
-    t.join().unwrap();
-}
-
-#[cfg(feature = "async")]
 #[async_std::test]
 async fn r#async_send_1_million_no_drop_or_reorder() {
     #[derive(Debug)]

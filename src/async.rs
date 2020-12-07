@@ -319,7 +319,13 @@ impl<'a, T> RecvFut<'a, T> {
                 let hook = self.hook.as_ref().map(Arc::clone).unwrap();
                 hook.update_waker(cx.waker());
                 wait_lock(&self.receiver.shared.chan).waiting.push_back(hook);
-                Poll::Pending
+                // To avoid a missed wakeup, re-check disconnect status here because the channel might have
+                // gotten shut down before we had a chance to push our hook
+                if self.receiver.shared.is_disconnected() {
+                    Poll::Ready(Err(RecvError::Disconnected))
+                } else {
+                    Poll::Pending
+                }
             }
         } else {
             let mut_self = self.get_mut();
