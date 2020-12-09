@@ -17,3 +17,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved async-related documentation
 
 ### Fixed
+
+- Updated `nanorand` to address security advisory
