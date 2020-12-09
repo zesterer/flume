@@ -34,12 +34,15 @@ fn stream_recv_disconnect() {
     let (tx, rx) = bounded::<i32>(0);
 
     let t = std::thread::spawn(move || {
+        tx.send(42);
         std::thread::sleep(std::time::Duration::from_millis(250));
         drop(tx)
     });
 
     async_std::task::block_on(async {
-        assert_eq!(rx.stream().next().await, None);
+        let mut stream = rx.into_stream();
+        assert_eq!(stream.next().await, Some(42));
+        assert_eq!(stream.next().await, None);
     });
 
     t.join().unwrap();
