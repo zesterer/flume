@@ -24,7 +24,7 @@ default = ["async", "select", "eventual-fairness"]
 spinning_top = "0.2"
 futures-sink = { version = "0.3.5", default_features = false, optional = true }
 futures-core = { version = "0.3.5", default_features = false, optional = true }
-nanorand = { version = "0.5", features = ["getrandom"], optional = true }
+nanorand = { version = "0.5.1", features = ["getrandom"], optional = true }
 
 [dev-dependencies]
 crossbeam-channel = "0.4"
