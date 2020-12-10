@@ -209,13 +209,12 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
         self.signal().fire()
     }
 
-    pub fn fire_recv(&self) -> T {
+    pub fn fire_recv(&self) -> (T, &S) {
         let msg = self.0.as_ref().unwrap().lock().take().unwrap();
-        let _ = self.signal().fire(); // Sender cannot be a stream
-        msg
+        (msg, self.signal())
     }
 
-    pub fn fire_send(&self, msg: T) -> (Option<T>, bool) {
+    pub fn fire_send(&self, msg: T) -> (Option<T>, &S) {
         let ret = match &self.0 {
             Some(hook) => {
                 *hook.lock() = Some(msg);
@@ -223,8 +222,7 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
             },
             None => Some(msg),
         };
-        let was_stream = self.signal().fire();
-        (ret, was_stream)
+        (ret, self.signal())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -339,7 +337,9 @@ impl<T> Chan<T> {
 
             while self.queue.len() < effective_cap {
                 if let Some(s) = sending.pop_front() {
-                    self.queue.push_back(s.fire_recv());
+                    let (msg, signal) = s.fire_recv();
+                    signal.fire();
+                    self.queue.push_back(msg);
                 } else {
                     break;
                 }
@@ -390,7 +390,8 @@ impl<T> Shared<T> {
             let mut msg = Some(msg);
 
             loop {
-                match chan.waiting.pop_front().map(|r| r.fire_send(msg.take().unwrap())) {
+                let slot = chan.waiting.pop_front();
+                match slot.as_ref().map(|r| r.fire_send(msg.take().unwrap())) {
                     // No more waiting receivers and msg in queue, so break out of the loop
                     None if msg.is_none() => break,
                     // No more waiting receivers, so add msg to queue and break out of the loop
@@ -398,19 +399,25 @@ impl<T> Shared<T> {
                         chan.queue.push_front(msg.unwrap());
                         break;
                     }
-                    Some((Some(m), true)) => {
-                        // Was async and a stream, so didn't acquire the message. Wake another
-                        // receiver, and do not yet push the message.
-                        msg.replace(m);
-                        continue
+                    Some((Some(m), signal)) => {
+                        if signal.fire() {
+                            // Was async and a stream, so didn't acquire the message. Wake another
+                            // receiver, and do not yet push the message.
+                            msg.replace(m);
+                            continue;
+                        } else {
+                            // Was async and not a stream, so it did acquire the message. Push the
+                            // message to the queue for it to be received.
+                            chan.queue.push_front(m);
+                            drop(chan);
+                            break;
+                        }
                     },
-                    Some((Some(m), false)) => {
-                        // Was async and not a stream, so it did acquire the message. Push the
-                        // message to the queue for it to be received.
-                        chan.queue.push_front(m);
-                        break
-                    }
-                    Some((None, _)) => break, // Was sync, so it has acquired the message
+                    Some((None, signal)) => {
+                        drop(chan);
+                        signal.fire();
+                        break; // Was sync, so it has acquired the message
+                    },
                 }
             }
 
@@ -479,9 +486,11 @@ impl<T> Shared<T> {
         let mut chan = wait_lock(&self.chan);
         chan.pull_pending(true);
 
-        if let Some(msg) = chan.queue.pop_front() {
+        let res = if let Some(msg) = chan.queue.pop_front() {
+            drop(chan);
             Ok(msg).into()
         } else if self.is_disconnected() {
+            drop(chan);
             Err(TryRecvTimeoutError::Disconnected).into()
         } else if should_block {
             let hook = make_signal();
@@ -490,8 +499,11 @@ impl<T> Shared<T> {
 
             do_block(hook)
         } else {
+            drop(chan);
             Err(TryRecvTimeoutError::Empty).into()
-        }
+        };
+
+        res
     }
 
     fn recv_sync(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
