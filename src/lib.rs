@@ -725,13 +725,13 @@ impl<T> Receiver<T> {
     }
 
     /// Create a blocking iterator over the values received on the channel that finishes iteration
-    /// when all receivers have been dropped.
+    /// when all senders have been dropped.
     pub fn iter(&self) -> Iter<T> {
         Iter { receiver: &self }
     }
 
     /// A non-blocking iterator over the values received on the channel that finishes iteration
-    /// when all receivers of the channel have been dropped or the channel is empty.
+    /// when all senders have been dropped or the channel is empty.
     pub fn try_iter(&self) -> TryIter<T> {
         TryIter { receiver: &self }
     }
