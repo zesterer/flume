@@ -10,6 +10,7 @@ use std::{
 use crate::*;
 use futures_core::{stream::{Stream, FusedStream}, future::FusedFuture};
 use futures_sink::Sink;
+use pin_project::{pin_project, pinned_drop};
 
 struct AsyncSignal {
     waker: Spinlock<Waker>,
@@ -69,7 +70,7 @@ impl<'a, T> Deref for OwnedOrRef<'a, T> {
     }
 }
 
-impl<T: Unpin> Sender<T> {
+impl<T> Sender<T> {
     /// Asynchronously send a value into the channel, returning an error if all receivers have been
     /// dropped. If the channel is bounded and is full, the returned future will yield to the async
     /// runtime.
@@ -126,13 +127,14 @@ enum SendState<T> {
 }
 
 /// A future that sends a value into a channel.
-pub struct SendFut<'a, T: Unpin> {
+#[pin_project(PinnedDrop)]
+pub struct SendFut<'a, T> {
     sender: OwnedOrRef<'a, Sender<T>>,
     // Only none after dropping
     hook: Option<SendState<T>>,
 }
 
-impl<'a, T: Unpin> SendFut<'a, T> {
+impl<'a, T> SendFut<'a, T> {
     /// Reset the hook, clearing it and removing it from the waiting sender's queue. This is called
     /// on drop and just before `start_send` in the `Sink` implementation.
     fn reset_hook(&mut self) {
@@ -146,13 +148,20 @@ impl<'a, T: Unpin> SendFut<'a, T> {
     }
 }
 
-impl<'a, T: Unpin> Drop for SendFut<'a, T> {
-    fn drop(&mut self) {
+#[pinned_drop]
+impl<'a, T> PinnedDrop for SendFut<'a, T> {
+    fn drop(mut self: Pin<&mut Self>) {
         self.reset_hook()
     }
 }
 
-impl<'a, T: Unpin> Future for SendFut<'a, T> {
+// impl<'a, T> Drop for SendFut<'a, T> {
+//     fn drop(&mut self) {
+//         self.reset_hook()
+//     }
+// }
+
+impl<'a, T> Future for SendFut<'a, T> {
     type Output = Result<(), SendError<T>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -172,7 +181,7 @@ impl<'a, T: Unpin> Future for SendFut<'a, T> {
                 Poll::Pending
             }
         } else if let Some(SendState::NotYetSent(_)) = self.hook {
-            let mut_self = self.get_mut();
+            let mut mut_self = self.project();
             let (shared, this_hook) = (&mut_self.sender.shared, &mut mut_self.hook);
 
             shared.send(
@@ -187,7 +196,7 @@ impl<'a, T: Unpin> Future for SendFut<'a, T> {
                 |msg| Hook::slot(Some(msg), AsyncSignal::new(cx, false)),
                 // do_block
                 |hook| {
-                    *this_hook = Some(SendState::QueuedItem(hook));
+                    **this_hook = Some(SendState::QueuedItem(hook));
                     Poll::Pending
                 }
             )
@@ -201,22 +210,22 @@ impl<'a, T: Unpin> Future for SendFut<'a, T> {
     }
 }
 
-impl<'a, T: Unpin> FusedFuture for SendFut<'a, T> {
+impl<'a, T> FusedFuture for SendFut<'a, T> {
     fn is_terminated(&self) -> bool {
         self.sender.shared.is_disconnected()
     }
 }
 
 /// A sink that allows sending values into a channel.
-pub struct SendSink<'a, T: Unpin>(SendFut<'a, T>);
+pub struct SendSink<'a, T>(SendFut<'a, T>);
 
-impl<'a, T: Unpin> SendSink<'a, T> {
+impl<'a, T> SendSink<'a, T> {
     pub fn is_disconnected(&self) -> bool {
         self.0.is_terminated()
     }
 }
 
-impl<'a, T: Unpin> Sink<T> for SendSink<'a, T> {
+impl<'a, T> Sink<T> for SendSink<'a, T> {
     type Error = SendError<T>;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
@@ -239,7 +248,7 @@ impl<'a, T: Unpin> Sink<T> for SendSink<'a, T> {
     }
 }
 
-impl<'a, T: Unpin> Clone for SendSink<'a, T> {
+impl<'a, T> Clone for SendSink<'a, T> {
     fn clone(&self) -> SendSink<'a, T> {
         SendSink(SendFut {
             sender: self.0.sender.clone(),
