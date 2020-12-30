@@ -1,6 +1,6 @@
 [package]
 name = "flume"
-version = "0.10.0"
+version = "0.10.1"
 authors = ["Joshua Barretto <joshua.s.barretto@gmail.com>"]
 edition = "2018"
 description = "A blazingly fast multi-producer channel"
@@ -28,7 +28,7 @@ nanorand = { version = "0.5", features = ["getrandom"], optional = true }
 pin-project = { version = "1", optional = true }
 
 [dev-dependencies]
-flume-test = { path = "../flume-test" }
+#flume-test = { path = "../flume-test" }
 crossbeam-channel = "0.4"
 crossbeam-utils = "0.7"
 criterion = "0.3.1"
