@@ -16,21 +16,31 @@ exclude = [
 
 [features]
 default = ["std", "sync"]
+# Support for `futures::Stream`
+stream = []
+# Support for `futures::Sink`
+sink = ["futures-sink"]
 # Standard library support (better thread contention performance)
 std = []
 # Synchronous channel operations like `.send(x)` and `.recv()`
 sync = ["std", "pollster"]
 # Synchronous timeout and deadline operations
-timeout = ["sync", "futures-timer", "futures-util"]
+time = ["sync", "futures-timer", "futures-util"]
 # Support for the `select!` macro and selection
 select = ["std", "futures-util/alloc"]
 
 [dependencies]
 spin = "0.7"
 pin-project-lite = "0.2"
-futures-timer = { version = "3.0", optional = true }
+futures-core = "0.3"
+futures-sink = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true }
+futures-timer = { version = "3.0", optional = true }
 pollster = { version = "0.2", optional = true }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dev-dependencies]
 crossbeam-channel = "0.4"

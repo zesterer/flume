@@ -21,11 +21,10 @@ pub struct Selector<'a> {
 impl<'a> Selector<'a> {
     pub fn new() -> Self { Self::default() }
 
-    pub fn send<T>(&mut self, token: Token, sender: &'a Sender<T>, item: T) -> Selection<'a, Result<(), T>> {
+    fn make_selection<F: Future + 'a>(&mut self, token: Token, fut: F) -> Selection<'a, F::Output> {
         let item_cell = Rc::new(RefCell::new(None));
         self.token_map.insert(token, self.selections.len());
-        self.selections.push(sender
-            .send_async(item)
+        self.selections.push(fut
             .map({
                 let item_cell = item_cell.clone();
                 move |res| { *item_cell.borrow_mut() = Some(res); token }
@@ -38,21 +37,36 @@ impl<'a> Selector<'a> {
         }
     }
 
-    pub fn recv<T>(&mut self, token: Token, receiver: &'a Receiver<T>) -> Selection<'a, Result<T, ()>> {
-        let item_cell = Rc::new(RefCell::new(None));
-        self.token_map.insert(token, self.selections.len());
-        self.selections.push(receiver
-            .recv_async()
-            .map({
-                let item_cell = item_cell.clone();
-                move |res| { *item_cell.borrow_mut() = Some(res); token }
-            })
-            .boxed_local());
+    pub fn send<T>(&mut self, token: Token, sender: &'a Sender<T>, item: T) -> Selection<'a, Result<(), T>> {
+        self.make_selection(token, sender.send_async(item))
+    }
 
-        Selection {
-            item_cell,
-            phantom: PhantomData,
-        }
+    #[cfg(feature = "time")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
+    pub fn send_timeout<T>(&mut self, token: Token, sender: &'a Sender<T>, item: T, timeout: Duration) -> Selection<'a, Result<(), T>> {
+        self.make_selection(token, sender.send_timeout_async(item, timeout))
+    }
+
+    #[cfg(feature = "time")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
+    pub fn send_deadline<T>(&mut self, token: Token, sender: &'a Sender<T>, item: T, deadline: Instant) -> Selection<'a, Result<(), T>> {
+        self.make_selection(token, sender.send_deadline_async(item, deadline))
+    }
+
+    pub fn recv<T>(&mut self, token: Token, receiver: &'a Receiver<T>) -> Selection<'a, Result<T, ()>> {
+        self.make_selection(token, receiver.recv_async())
+    }
+
+    #[cfg(feature = "time")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
+    pub fn recv_timeout<T>(&mut self, token: Token, receiver: &'a Receiver<T>, timeout: Duration) -> Selection<'a, Result<T, ()>> {
+        self.make_selection(token, receiver.recv_timeout_async(timeout))
+    }
+
+    #[cfg(feature = "time")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
+    pub fn recv_deadline<T>(&mut self, token: Token, receiver: &'a Receiver<T>, deadline: Instant) -> Selection<'a, Result<T, ()>> {
+        self.make_selection(token, receiver.recv_deadline_async(deadline))
     }
 
     pub async fn wait_async(self) -> Token {

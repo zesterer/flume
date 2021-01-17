@@ -40,7 +40,21 @@ impl<T> Bounded<T> {
     pub fn try_recv(&mut self) -> Option<(Option<Waker>, T)> {
         self.queue
             .pop_front()
-            .map(|item| (None, item))
+            .map(|item| {
+                // We just made some space in the queue so we need to pull the next waiting sender too
+                loop {
+                    if let Some((waker, item)) = self.sends.pop_front() {
+                        // Attempt to take the item in the slot. If the item does not exist, it must be because the sender
+                        // cancelled sending (perhaps due to a timeout). In such a case, don't bother to wake the sender (because
+                        // it should already have been woken by the timeout alarm) and skip to the next entry.
+                        if let Some(item) = item.try_take() {
+                            break (Some(waker), item);
+                        }
+                    } else {
+                        break (None, item);
+                    }
+                }
+            })
             .or_else(|| {
                 while let Some((waker, item)) = self.sends.pop_front() {
                     // Attempt to take the item in the slot. If the item does not exist, it must be because the sender
@@ -70,5 +84,30 @@ impl<T> Bounded<T> {
                 self.recvs.push_back((waker(), item.clone()));
                 item
             })
+    }
+
+    pub fn drain(&mut self) -> VecDeque<T> {
+        let items = core::mem::take(&mut self.queue);
+
+        // We've made space in the queue so we need to pull waiting senders
+        while self.queue.len() < self.cap {
+            if let Some((waker, item)) = self.sends.pop_front() {
+                // Attempt to take the item in the slot. If the item does not exist, it must be because the sender
+                // cancelled sending (perhaps due to a timeout). In such a case, don't bother to wake the sender (because
+                // it should already have been woken by the timeout alarm) and skip to the next entry.
+                if let Some(item) = item.try_take() {
+                    waker.wake();
+                    self.queue.push_back(item);
+                }
+            } else {
+                break;
+            }
+        }
+
+        items
+    }
+
+    pub fn len_cap(&self) -> (usize, Option<usize>) {
+        (self.queue.len(), Some(self.cap))
     }
 }

@@ -57,4 +57,12 @@ impl<T> Rendezvous<T> {
                 item
             })
     }
+
+    pub fn drain(&mut self) -> VecDeque<T> {
+        VecDeque::new()
+    }
+
+    pub fn len_cap(&self) -> (usize, Option<usize>) {
+        (0, Some(0))
+    }
 }

@@ -1,10 +1,19 @@
 #![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 extern crate alloc;
 
-pub mod sender;
-pub mod receiver;
-#[cfg(feature = "select")] pub mod select;
+mod sender;
+mod receiver;
+#[cfg(feature = "sink")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sink")))]
+mod sink;
+#[cfg(feature = "stream")]
+#[cfg_attr(docsrs, doc(cfg(feature = "stream")))]
+mod stream;
+#[cfg(feature = "select")]
+#[cfg_attr(docsrs, doc(cfg(feature = "select")))]
+pub mod select;
 
 mod chan;
 mod rendezvous;
@@ -13,21 +22,34 @@ mod unbounded;
 
 pub use crate::{
     chan::{SendFut, RecvFut},
-    sender::Sender,
-    receiver::Receiver,
+    sender::{Sender, IntoSendFut},
+    receiver::{Receiver, IntoRecvFut, TryIter, IntoTryIter, Drain, IntoDrain},
 };
 
-#[cfg(feature = "select")] pub use select::Selector;
+#[cfg(feature = "sync")] pub use crate::receiver::{Iter, IntoIter};
+
+#[cfg(feature = "sink")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sink")))]
+pub use crate::sink::SendSink;
+#[cfg(feature = "stream")]
+#[cfg_attr(docsrs, doc(cfg(feature = "stream")))]
+pub use crate::stream::RecvStream;
+#[cfg(feature = "select")]
+#[cfg_attr(docsrs, doc(cfg(feature = "select")))]
+pub use crate::select::Selector;
 
 use core::{
     task::{Waker, Poll, Context},
     pin::Pin,
     future::Future,
+    marker::PhantomData,
     sync::atomic::{AtomicUsize, AtomicBool, Ordering},
 };
+#[cfg(feature = "std")] use std::time::Duration;
+#[cfg(feature = "time")] use std::time::Instant;
 use alloc::{sync::Arc, collections::VecDeque, borrow::Cow};
 use pin_project_lite::pin_project;
-#[cfg(feature = "std")] use std::time::{Duration, Instant};
+use futures_core::future::FusedFuture;
 
 use crate::{
     chan::{Channel, Flavor, Booth},

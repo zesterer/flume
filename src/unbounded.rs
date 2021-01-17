@@ -46,4 +46,12 @@ impl<T> Unbounded<T> {
                 item
             })
     }
+
+    pub fn drain(&mut self) -> VecDeque<T> {
+        core::mem::take(&mut self.queue)
+    }
+
+    pub fn len_cap(&self) -> (usize, Option<usize>) {
+        (self.queue.len(), None)
+    }
 }

@@ -36,6 +36,32 @@ impl<T> Channel<T> {
         self.disconnected.load(Ordering::Relaxed)
     }
 
+    pub fn len_cap(&self) -> (usize, Option<usize>) {
+        match &self.flavor {
+            Flavor::Rendezvous(f) => wait_lock(f).len_cap(),
+            Flavor::Bounded(f) => wait_lock(f).len_cap(),
+            Flavor::Unbounded(f) => wait_lock(f).len_cap(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool { self.len_cap().0 == 0 }
+
+    pub fn is_full(&self) -> bool {
+        let (len, cap) = self.len_cap();
+        cap.map_or(false, |cap| {
+            debug_assert!(len <= cap, "This isn't supposed to happen, please submit a bug report.");
+            len == cap
+        })
+    }
+
+    pub fn drain(&self) -> VecDeque<T> {
+        match &self.flavor {
+            Flavor::Rendezvous(f) => wait_lock(f).drain(),
+            Flavor::Bounded(f) => wait_lock(f).drain(),
+            Flavor::Unbounded(f) => wait_lock(f).drain(),
+        }
+    }
+
     pub fn try_send(&self, item: T) -> Option<T> {
         match &self.flavor {
             Flavor::Rendezvous(f) => wait_lock(f).try_send(item).map(|w| w.wake()).err(),
@@ -52,24 +78,34 @@ impl<T> Channel<T> {
         }
     }
 
-    pub fn send_async<'a>(chan: Cow<'a, Arc<Self>>, item: T) -> SendFut<'a, T> {
-        SendFut { chan, item: Some(Err(item)) }
+    pub fn send_async<'a>(sender: Cow<'a, Sender<T>>, item: T) -> SendFut<'a, T> {
+        SendFut { sender, item: Some(Err(item)) }
     }
 
-    pub fn recv_async<'a>(chan: Cow<'a, Arc<Self>>) -> RecvFut<'a, T> {
-        RecvFut { chan, item: Some(None) }
+    #[cfg(feature = "sink")]
+    pub fn send_async_exhausted<'a>(sender: Cow<'a, Sender<T>>) -> SendFut<'a, T> {
+        SendFut { sender, item: None }
+    }
+
+    pub fn recv_async<'a>(receiver: Cow<'a, Receiver<T>>) -> RecvFut<'a, T> {
+        RecvFut { receiver, item: Some(None) }
     }
 }
 
 pin_project! {
     pub struct SendFut<'a, T> {
-        chan: Cow<'a, Arc<Channel<T>>>,
+        sender: Cow<'a, Sender<T>>,
         item: Option<Result<Booth<T>, T>>,
     }
 }
 
 impl<'a, T> SendFut<'a, T> {
-    #[cfg(feature = "timeouts")]
+    #[cfg(feature = "sink")]
+    pub(crate) fn into_sender(self) -> Cow<'a, Sender<T>> {
+        self.sender
+    }
+
+    #[cfg(feature = "time")]
     pub(crate) fn try_reclaim(mut self) -> Option<T> {
         self.item
             .take()
@@ -87,7 +123,7 @@ impl<'a, T> Future for SendFut<'a, T> {
         let this = self.project();
         *this.item = if let Some(item) = this.item.take() {
             Some(match item {
-                Err(item) => match match &this.chan.flavor {
+                Err(item) => match match &this.sender.0.flavor {
                     Flavor::Rendezvous(f) => wait_lock(f).send(item, || cx.waker().clone()).map(|w| w.wake()),
                     Flavor::Bounded(f) => wait_lock(f).send(item, || cx.waker().clone()).map(|w| { w.map(|w| w.wake()); }),
                     Flavor::Unbounded(f) => Ok(wait_lock(f).send(item).map(|w| w.wake()).unwrap_or(())),
@@ -97,7 +133,7 @@ impl<'a, T> Future for SendFut<'a, T> {
                 },
                 Ok(item) => if !item.is_full() {
                     return Poll::Ready(Ok(()));
-                } else if this.chan.is_disconnected() {
+                } else if this.sender.0.is_disconnected() {
                     return Poll::Ready(item.try_take().map(Err).unwrap_or(Ok(())));
                 } else {
                     Ok(item)
@@ -112,10 +148,29 @@ impl<'a, T> Future for SendFut<'a, T> {
     }
 }
 
+impl<'a, T> FusedFuture for SendFut<'a, T> {
+    fn is_terminated(&self) -> bool { self.item.is_none() }
+}
+
 pin_project! {
     pub struct RecvFut<'a, T> {
-        chan: Cow<'a, Arc<Channel<T>>>,
+        receiver: Cow<'a, Receiver<T>>,
         item: Option<Option<Booth<T>>>,
+    }
+}
+
+impl<'a, T> RecvFut<'a, T> {
+    #[cfg(feature = "stream")]
+    pub(crate) fn into_receiver(self) -> Cow<'a, Receiver<T>> {
+        self.receiver
+    }
+
+    #[cfg(feature = "time")]
+    pub(crate) fn try_reclaim(mut self) -> Option<T> {
+        self.item
+            .take()
+            .flatten()
+            .and_then(|item| item.try_take())
     }
 }
 
@@ -126,7 +181,7 @@ impl<'a, T> Future for RecvFut<'a, T> {
         let this = self.project();
         *this.item = if let Some(item) = this.item.take() {
             Some(match item {
-                None => match match &this.chan.flavor {
+                None => match match &this.receiver.0.flavor {
                     Flavor::Rendezvous(f) => wait_lock(f).recv(|| cx.waker().clone()).map(|(w, item)| { w.wake(); item }),
                     Flavor::Bounded(f) => wait_lock(f).recv(|| cx.waker().clone()).map(|(w, item)| { w.map(|w| w.wake()); item }),
                     Flavor::Unbounded(f) => wait_lock(f).recv(|| cx.waker().clone()),
@@ -136,7 +191,7 @@ impl<'a, T> Future for RecvFut<'a, T> {
                 },
                 Some(item) => if let Some(item) = item.try_take() {
                     return Poll::Ready(Ok(item));
-                } else if this.chan.is_disconnected() {
+                } else if this.receiver.0.is_disconnected() {
                     return Poll::Ready(Err(()));
                 } else {
                     Some(item)
@@ -149,6 +204,10 @@ impl<'a, T> Future for RecvFut<'a, T> {
 
         Poll::Pending
     }
+}
+
+impl<'a, T> FusedFuture for RecvFut<'a, T> {
+    fn is_terminated(&self) -> bool { self.item.is_none() }
 }
 
 #[derive(Default)]
