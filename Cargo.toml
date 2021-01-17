@@ -1,5 +1,5 @@
 [package]
-name = "flume"
+name = "flume2" # !!!!!!!!!!!!!!!!!!!!!! CHANGE NAME !!!!!!!!!!!!!!!!!!!!!!
 version = "0.10.1"
 authors = ["Joshua Barretto <joshua.s.barretto@gmail.com>"]
 edition = "2018"
@@ -15,20 +15,24 @@ exclude = [
 ]
 
 [features]
-select = []
-async = ["futures-sink", "futures-core", "pin-project"]
-eventual-fairness = ["async", "nanorand"]
-default = ["async", "select", "eventual-fairness"]
+default = ["std", "sync"]
+# Standard library support (better thread contention performance)
+std = []
+# Synchronous channel operations like `.send(x)` and `.recv()`
+sync = ["std", "pollster"]
+# Synchronous timeout and deadline operations
+timeout = ["sync", "futures-timer", "futures-util"]
+# Support for the `select!` macro and selection
+select = ["std", "futures-util/alloc"]
 
 [dependencies]
-spinning_top = "0.2"
-futures-sink = { version = "0.3.5", default_features = false, optional = true }
-futures-core = { version = "0.3.5", default_features = false, optional = true }
-nanorand = { version = "0.5", features = ["getrandom"], optional = true }
-pin-project = { version = "1", optional = true }
+spin = "0.7"
+pin-project = "1"
+futures-timer = { version = "3.0", optional = true }
+futures-util = { version = "0.3", optional = true }
+pollster = { version = "0.2", optional = true }
 
 [dev-dependencies]
-#flume-test = { path = "../flume-test" }
 crossbeam-channel = "0.4"
 crossbeam-utils = "0.7"
 criterion = "0.3.1"
