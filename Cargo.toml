@@ -27,7 +27,7 @@ select = ["std", "futures-util/alloc"]
 
 [dependencies]
 spin = "0.7"
-pin-project = "1"
+pin-project-lite = "0.2"
 futures-timer = { version = "3.0", optional = true }
 futures-util = { version = "0.3", optional = true }
 pollster = { version = "0.2", optional = true }

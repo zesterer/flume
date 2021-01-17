@@ -61,10 +61,11 @@ impl<T> Channel<T> {
     }
 }
 
-#[pin_project]
-pub struct SendFut<'a, T> {
-    chan: Cow<'a, Arc<Channel<T>>>,
-    item: Option<Result<Booth<T>, T>>,
+pin_project! {
+    pub struct SendFut<'a, T> {
+        chan: Cow<'a, Arc<Channel<T>>>,
+        item: Option<Result<Booth<T>, T>>,
+    }
 }
 
 impl<'a, T> SendFut<'a, T> {
@@ -111,10 +112,11 @@ impl<'a, T> Future for SendFut<'a, T> {
     }
 }
 
-#[pin_project]
-pub struct RecvFut<'a, T> {
-    chan: Cow<'a, Arc<Channel<T>>>,
-    item: Option<Option<Booth<T>>>,
+pin_project! {
+    pub struct RecvFut<'a, T> {
+        chan: Cow<'a, Arc<Channel<T>>>,
+        item: Option<Option<Booth<T>>>,
+    }
 }
 
 impl<'a, T> Future for RecvFut<'a, T> {

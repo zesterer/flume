@@ -26,7 +26,7 @@ use core::{
     sync::atomic::{AtomicUsize, AtomicBool, Ordering},
 };
 use alloc::{sync::Arc, collections::VecDeque, borrow::Cow};
-use pin_project::pin_project;
+use pin_project_lite::pin_project;
 #[cfg(feature = "std")] use std::time::{Duration, Instant};
 
 use crate::{
