@@ -19,14 +19,22 @@ mod chan;
 mod rendezvous;
 mod bounded;
 mod unbounded;
+mod error;
 
 pub use crate::{
     chan::{SendFut, RecvFut},
     sender::{Sender, IntoSendFut},
     receiver::{Receiver, IntoRecvFut, TryIter, IntoTryIter, Drain, IntoDrain},
+    error::{TrySendError, TryRecvError},
 };
 
-#[cfg(feature = "sync")] pub use crate::receiver::{Iter, IntoIter};
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub use crate::receiver::{Iter, IntoIter};
+#[cfg(feature = "sync")]
+pub use crate::error::{SendError, RecvError};
+#[cfg(feature = "time")]
+pub use crate::error::{SendTimeoutError, RecvTimeoutError};
 
 #[cfg(feature = "sink")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sink")))]
@@ -44,9 +52,12 @@ use core::{
     future::Future,
     marker::PhantomData,
     sync::atomic::{AtomicUsize, AtomicBool, Ordering},
+    fmt,
 };
-#[cfg(feature = "std")] use std::time::Duration;
-#[cfg(feature = "time")] use std::time::Instant;
+#[cfg(feature = "std")]
+use std::time::Duration;
+#[cfg(feature = "time")]
+use std::time::Instant;
 use alloc::{sync::Arc, collections::VecDeque, borrow::Cow};
 use pin_project_lite::pin_project;
 use futures_core::future::FusedFuture;
@@ -58,11 +69,19 @@ use crate::{
     unbounded::Unbounded,
 };
 
-#[cfg(all(windows, feature = "std"))] type Lock<T> = std::sync::Mutex<T>;
-#[cfg(all(windows, feature = "std"))] type LockGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+#[cfg(feature = "sync")]
+use pollster::block_on;
+//use futures_executor::block_on;
 
-#[cfg(not(all(windows, feature = "std")))] type Lock<T> = spin::mutex::SpinMutex<T>;
-#[cfg(not(all(windows, feature = "std")))] type LockGuard<'a, T> = spin::mutex::SpinMutexGuard<'a, T>;
+#[cfg(all(windows, feature = "std"))]
+type Lock<T> = std::sync::Mutex<T>;
+#[cfg(all(windows, feature = "std"))]
+type LockGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+
+#[cfg(not(all(windows, feature = "std")))]
+type Lock<T> = spin::mutex::SpinMutex<T>;
+#[cfg(not(all(windows, feature = "std")))]
+type LockGuard<'a, T> = spin::mutex::SpinMutexGuard<'a, T>;
 
 #[cfg(all(not(windows), feature = "std"))]
 fn wait_lock<'a, T>(lock: &'a Lock<T>) -> LockGuard<'a, T> {
@@ -96,8 +115,11 @@ pub fn rendezvous<T>() -> (Sender<T>, Receiver<T>) {
 }
 
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
-    assert!(cap > 0, "Bounded channels with a size of 0 are rendezvous channels. Use `flume::rendezvous` instead.");
-    let chan = Arc::new(Channel::new(Bounded::new(cap)));
+    let chan = Arc::new(Channel::new(if cap == 0 {
+        Rendezvous::new()
+    } else {
+        Bounded::new(cap)
+    }));
     (Sender(chan.clone()), Receiver(chan))
 }
 

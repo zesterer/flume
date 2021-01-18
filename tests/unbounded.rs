@@ -1,6 +1,6 @@
 #![cfg(feature = "sync")]
 
-use flume2::unbounded;
+use flume::unbounded;
 
 #[test]
 fn basic() {

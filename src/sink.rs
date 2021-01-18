@@ -5,7 +5,7 @@ pub struct SendSink<'a, T> {
 }
 
 impl<'a, T> futures_sink::Sink<T> for SendSink<'a, T> {
-    type Error = T;
+    type Error = SendError<T>;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         let send = self.send.take().unwrap();

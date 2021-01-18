@@ -1,11 +1,11 @@
 #[cfg(feature = "select")]
 fn main() {
-    use flume2::Selector;
+    use flume::{Selector, unbounded};
     use rand::prelude::*;
 
     // Create two channels
-    let (red_tx, red_rx) = flume2::unbounded();
-    let (blue_tx, blue_rx) = flume2::unbounded();
+    let (red_tx, red_rx) = unbounded();
+    let (blue_tx, blue_rx) = unbounded();
 
     // To make it fair, randomise the start order
     let mut racers = vec![("Red", red_tx), ("Blue", blue_tx)];

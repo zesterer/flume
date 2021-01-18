@@ -1,6 +1,6 @@
 #![cfg(feature = "sync")]
 
-use flume2::rendezvous;
+use flume::{rendezvous, SendError};
 use std::{
     time::{Instant, Duration},
     thread::{spawn, sleep},
@@ -34,7 +34,7 @@ fn drop_recv() {
     });
 
     let then = Instant::now();
-    assert_eq!(Err(42), tx.send(42));
+    assert_eq!(Err(SendError::Disconnected(42)), tx.send(42));
     let now = Instant::now();
 
     assert!(now.duration_since(then) > ms(250));

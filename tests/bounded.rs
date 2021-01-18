@@ -1,6 +1,6 @@
 #![cfg(feature = "sync")]
 
-use flume2::bounded;
+use flume::{bounded, TrySendError, TryRecvError};
 use std::{
     time::{Instant, Duration},
     thread::{spawn, sleep},
@@ -16,7 +16,7 @@ fn basic() {
         tx.send(i).unwrap();
     }
 
-    assert_eq!(tx.try_send(16), Err(16));
+    assert_eq!(tx.try_send(16), Err(TrySendError::Full(16)));
 
     spawn(move || {
         sleep(ms(250));
@@ -27,7 +27,7 @@ fn basic() {
         assert_eq!(rx.recv(), Ok(i));
     }
 
-    assert_eq!(rx.try_recv(), Err(()));
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
 
     let then = Instant::now();
     assert_eq!(Ok(42), rx.recv());

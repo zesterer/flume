@@ -1,6 +1,7 @@
 use super::*;
 
 pub(crate) struct Bounded<T> {
+    disconnected: bool,
     cap: usize,
     sends: VecDeque<(Waker, Booth<T>)>,
     queue: VecDeque<T>,
@@ -9,51 +10,61 @@ pub(crate) struct Bounded<T> {
 
 impl<T> Bounded<T> {
     pub fn new(cap: usize) -> Flavor<T> {
-        Flavor::Bounded(Lock::new(Self {
+        Flavor::Bounded(Self {
+            disconnected: false,
             cap,
             sends: VecDeque::new(),
             queue: VecDeque::new(),
             recvs: VecDeque::new(),
-        }))
+        })
     }
 
     pub fn disconnect(&mut self) {
+        self.disconnected = true;
         self.sends.drain(..).for_each(|(w, _)| w.wake());
         self.recvs.drain(..).for_each(|(w, _)| w.wake());
     }
 
-    pub fn try_send(&mut self, item: T) -> Result<Option<Waker>, T> {
-        match self.recvs.pop_front() {
-            Some((waker, booth)) => {
-                booth.give(item);
-                Ok(Some(waker))
-            },
-            None => if self.queue.len() < self.cap {
-                self.queue.push_back(item);
-                Ok(None)
-            } else {
-                Err(item)
-            },
+    pub fn try_send(&mut self, mut item: T) -> Result<Option<Waker>, (T, bool)> {
+        if self.disconnected {
+            return Err((item, true));
+        }
+
+        loop {
+            item = match self.recvs.pop_front() {
+                Some((waker, booth)) => match booth.give(item) {
+                    Some(item) => item,
+                    None => break Ok(Some(waker)), // Woke receiver
+                },
+                None => break if self.queue.len() < self.cap {
+                    self.queue.push_back(item);
+                    Ok(None) // Pushed to queue
+                } else {
+                    Err((item, false)) // Queue is full
+                },
+            };
         }
     }
 
-    pub fn try_recv(&mut self) -> Option<(Option<Waker>, T)> {
+    pub fn try_recv(&mut self) -> Result<(Option<Waker>, T), bool> {
         self.queue
             .pop_front()
             .map(|item| {
                 // We just made some space in the queue so we need to pull the next waiting sender too
-                loop {
+                let w = loop {
                     if let Some((waker, item)) = self.sends.pop_front() {
                         // Attempt to take the item in the slot. If the item does not exist, it must be because the sender
                         // cancelled sending (perhaps due to a timeout). In such a case, don't bother to wake the sender (because
                         // it should already have been woken by the timeout alarm) and skip to the next entry.
                         if let Some(item) = item.try_take() {
-                            break (Some(waker), item);
+                            self.queue.push_back(item);
+                            break Some(waker);
                         }
                     } else {
-                        break (None, item);
+                        break None;
                     }
-                }
+                };
+                (w, item)
             })
             .or_else(|| {
                 while let Some((waker, item)) = self.sends.pop_front() {
@@ -66,23 +77,28 @@ impl<T> Bounded<T> {
                 }
                 None
             })
+            .ok_or(self.disconnected)
     }
 
-    pub fn send(&mut self, item: T, waker: impl FnOnce() -> Waker) -> Result<Option<Waker>, Booth<T>> {
+    pub fn send(&mut self, item: T, waker: impl FnOnce() -> Waker) -> Result<Option<Waker>, Result<Booth<T>, T>> {
         self.try_send(item)
-            .map_err(|item| {
+            .map_err(|(item, d)| if d {
+                Err(item)
+            } else {
                 let item = Booth::full(item);
                 self.sends.push_back((waker(), item.clone()));
-                item
+                Ok(item)
             })
     }
 
-    pub fn recv(&mut self, waker: impl FnOnce() -> Waker) -> Result<(Option<Waker>, T), Booth<T>> {
+    pub fn recv(&mut self, waker: impl FnOnce() -> Waker) -> Result<(Option<Waker>, T), Option<Booth<T>>> {
         self.try_recv()
-            .ok_or_else(|| {
+            .map_err(|d| if d {
+                None
+            } else {
                 let item = Booth::empty();
                 self.recvs.push_back((waker(), item.clone()));
-                item
+                Some(item)
             })
     }
 

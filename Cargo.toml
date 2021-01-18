@@ -1,5 +1,5 @@
 [package]
-name = "flume2" # !!!!!!!!!!!!!!!!!!!!!! CHANGE NAME !!!!!!!!!!!!!!!!!!!!!!
+name = "flume"
 version = "0.10.1"
 authors = ["Joshua Barretto <joshua.s.barretto@gmail.com>"]
 edition = "2018"
@@ -30,13 +30,14 @@ time = ["sync", "futures-timer", "futures-util"]
 select = ["std", "futures-util/alloc"]
 
 [dependencies]
-spin = "0.7"
+spin = { version = "0.7", default-features = false }
 pin-project-lite = "0.2"
 futures-core = "0.3"
 futures-sink = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true }
 futures-timer = { version = "3.0", optional = true }
 pollster = { version = "0.2", optional = true }
+#futures-executor = "0.3"
 
 [package.metadata.docs.rs]
 all-features = true

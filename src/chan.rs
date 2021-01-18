@@ -1,13 +1,13 @@
 use super::*;
 
 pub(crate) enum Flavor<T> {
-    Rendezvous(Lock<Rendezvous<T>>),
-    Bounded(Lock<Bounded<T>>),
-    Unbounded(Lock<Unbounded<T>>),
+    Rendezvous(Rendezvous<T>),
+    Bounded(Bounded<T>),
+    Unbounded(Unbounded<T>),
 }
 
 pub(crate) struct Channel<T> {
-    flavor: Flavor<T>,
+    flavor: Lock<Flavor<T>>,
     disconnected: AtomicBool,
     pub sends: AtomicUsize,
     pub recvs: AtomicUsize,
@@ -16,7 +16,7 @@ pub(crate) struct Channel<T> {
 impl<T> Channel<T> {
     pub fn new(flavor: Flavor<T>) -> Self {
         Self {
-            flavor,
+            flavor: Lock::new(flavor),
             disconnected: AtomicBool::new(false),
             sends: AtomicUsize::new(1),
             recvs: AtomicUsize::new(1),
@@ -25,10 +25,10 @@ impl<T> Channel<T> {
 
     pub fn disconnect(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
-        match &self.flavor {
-            Flavor::Rendezvous(f) => wait_lock(f).disconnect(),
-            Flavor::Bounded(f) => wait_lock(f).disconnect(),
-            Flavor::Unbounded(f) => wait_lock(f).disconnect(),
+        match &mut *wait_lock(&self.flavor) {
+            Flavor::Rendezvous(f) => f.disconnect(),
+            Flavor::Bounded(f) => f.disconnect(),
+            Flavor::Unbounded(f) => f.disconnect(),
         }
     }
 
@@ -37,10 +37,10 @@ impl<T> Channel<T> {
     }
 
     pub fn len_cap(&self) -> (usize, Option<usize>) {
-        match &self.flavor {
-            Flavor::Rendezvous(f) => wait_lock(f).len_cap(),
-            Flavor::Bounded(f) => wait_lock(f).len_cap(),
-            Flavor::Unbounded(f) => wait_lock(f).len_cap(),
+        match &mut *wait_lock(&self.flavor) {
+            Flavor::Rendezvous(f) => f.len_cap(),
+            Flavor::Bounded(f) => f.len_cap(),
+            Flavor::Unbounded(f) => f.len_cap(),
         }
     }
 
@@ -55,26 +55,26 @@ impl<T> Channel<T> {
     }
 
     pub fn drain(&self) -> VecDeque<T> {
-        match &self.flavor {
-            Flavor::Rendezvous(f) => wait_lock(f).drain(),
-            Flavor::Bounded(f) => wait_lock(f).drain(),
-            Flavor::Unbounded(f) => wait_lock(f).drain(),
+        match &mut *wait_lock(&self.flavor) {
+            Flavor::Rendezvous(f) => f.drain(),
+            Flavor::Bounded(f) => f.drain(),
+            Flavor::Unbounded(f) => f.drain(),
         }
     }
 
-    pub fn try_send(&self, item: T) -> Option<T> {
-        match &self.flavor {
-            Flavor::Rendezvous(f) => wait_lock(f).try_send(item).map(|w| w.wake()).err(),
-            Flavor::Bounded(f) => wait_lock(f).try_send(item).map(|w| w.map(|w| w.wake())).err(),
-            Flavor::Unbounded(f) => { wait_lock(f).try_send(item).map(|w| w.wake()); None },
+    pub fn try_send(&self, item: T) -> Result<(), (T, bool)> {
+        match &mut *wait_lock(&self.flavor) {
+            Flavor::Rendezvous(f) => f.try_send(item).map(|w| w.wake()),
+            Flavor::Bounded(f) => f.try_send(item).map(|w| { w.map(|w| w.wake()); }),
+            Flavor::Unbounded(f) => f.try_send(item).map(|w| { w.map(|w| w.wake()); }),
         }
     }
 
-    pub fn try_recv(&self) -> Option<T> {
-        match &self.flavor {
-            Flavor::Rendezvous(f) => wait_lock(f).try_recv().map(|(waker, item)| { waker.wake(); item }),
-            Flavor::Bounded(f) => wait_lock(f).try_recv().map(|(waker, item)| { waker.map(|w| w.wake()); item }),
-            Flavor::Unbounded(f) => wait_lock(f).try_recv(),
+    pub fn try_recv(&self) -> Result<T, bool> {
+        match &mut *wait_lock(&self.flavor) {
+            Flavor::Rendezvous(f) => f.try_recv().map(|(waker, item)| { waker.wake(); item }),
+            Flavor::Bounded(f) => f.try_recv().map(|(waker, item)| { waker.map(|w| w.wake()); item }),
+            Flavor::Unbounded(f) => f.try_recv(),
         }
     }
 
@@ -110,31 +110,35 @@ impl<'a, T> SendFut<'a, T> {
         self.item
             .take()
             .and_then(|item| match item {
-                Ok(item) => item.try_take(),
+                Ok(item) => item.try_take_deactivate(),
                 Err(item) => Some(item),
             })
     }
 }
 
 impl<'a, T> Future for SendFut<'a, T> {
-    type Output = Result<(), T>;
+    type Output = Result<(), SendError<T>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let this = self.project();
         *this.item = if let Some(item) = this.item.take() {
             Some(match item {
-                Err(item) => match match &this.sender.0.flavor {
-                    Flavor::Rendezvous(f) => wait_lock(f).send(item, || cx.waker().clone()).map(|w| w.wake()),
-                    Flavor::Bounded(f) => wait_lock(f).send(item, || cx.waker().clone()).map(|w| { w.map(|w| w.wake()); }),
-                    Flavor::Unbounded(f) => Ok(wait_lock(f).send(item).map(|w| w.wake()).unwrap_or(())),
+                Err(item) => match match &mut *wait_lock(&this.sender.0.flavor) {
+                    Flavor::Rendezvous(f) => f.send(item, || cx.waker().clone()).map(|w| w.wake()),
+                    Flavor::Bounded(f) => f.send(item, || cx.waker().clone()).map(|w| { w.map(|w| w.wake()); }),
+                    Flavor::Unbounded(f) => Ok(f.send(item).map(|w| { w.map(|w| w.wake()); }).unwrap_or(())),
                 } {
                     Ok(()) => return Poll::Ready(Ok(())),
-                    Err(item) => Ok(item),
+                    Err(Err(item)) => return Poll::Ready(Err(SendError::Disconnected(item))),
+                    Err(Ok(item)) => Ok(item),
                 },
                 Ok(item) => if !item.is_full() {
                     return Poll::Ready(Ok(()));
                 } else if this.sender.0.is_disconnected() {
-                    return Poll::Ready(item.try_take().map(Err).unwrap_or(Ok(())));
+                    match item.try_take_deactivate() {
+                        Some(item) => return Poll::Ready(Err(SendError::Disconnected(item))),
+                        None => return Poll::Ready(Ok(())),
+                    }
                 } else {
                     Ok(item)
                 },
@@ -170,29 +174,34 @@ impl<'a, T> RecvFut<'a, T> {
         self.item
             .take()
             .flatten()
-            .and_then(|item| item.try_take())
+            .and_then(|item| item.try_take_deactivate())
     }
 }
 
 impl<'a, T> Future for RecvFut<'a, T> {
-    type Output = Result<T, ()>;
+    type Output = Result<T, RecvError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let this = self.project();
         *this.item = if let Some(item) = this.item.take() {
             Some(match item {
-                None => match match &this.receiver.0.flavor {
-                    Flavor::Rendezvous(f) => wait_lock(f).recv(|| cx.waker().clone()).map(|(w, item)| { w.wake(); item }),
-                    Flavor::Bounded(f) => wait_lock(f).recv(|| cx.waker().clone()).map(|(w, item)| { w.map(|w| w.wake()); item }),
-                    Flavor::Unbounded(f) => wait_lock(f).recv(|| cx.waker().clone()),
+                None => match match &mut *wait_lock(&this.receiver.0.flavor) {
+                    Flavor::Rendezvous(f) => f.recv(|| cx.waker().clone()).map(|(w, item)| { w.wake(); item }),
+                    Flavor::Bounded(f) => f.recv(|| cx.waker().clone()).map(|(w, item)| { w.map(|w| w.wake()); item }),
+                    Flavor::Unbounded(f) => f.recv(|| cx.waker().clone()),
                 } {
                     Ok(item) => return Poll::Ready(Ok(item)),
-                    Err(item) => Some(item),
+                    Err(None) => return Poll::Ready(Err(RecvError::Disconnected)),
+                    Err(Some(item)) => Some(item),
                 },
                 Some(item) => if let Some(item) = item.try_take() {
                     return Poll::Ready(Ok(item));
                 } else if this.receiver.0.is_disconnected() {
-                    return Poll::Ready(Err(()));
+                    if let Some(item) = item.try_take() {
+                        return Poll::Ready(Ok(item));
+                    } else {
+                        return Poll::Ready(Err(RecvError::Disconnected));
+                    }
                 } else {
                     Some(item)
                 },
@@ -212,7 +221,7 @@ impl<'a, T> FusedFuture for RecvFut<'a, T> {
 
 #[derive(Default)]
 pub(crate) struct Booth<T> {
-    inner: Arc<Lock<Option<T>>>,
+    pub(crate) inner: Arc<spin::mutex::SpinMutex<(Option<T>, bool)>>,
 }
 
 impl<T> Clone for Booth<T> {
@@ -223,24 +232,37 @@ impl<T> Clone for Booth<T> {
 
 impl<T> Booth<T> {
     pub fn full(item: T) -> Self {
-        Self { inner: Arc::new(Lock::new(Some(item))), }
+        Self { inner: Arc::new(spin::mutex::SpinMutex::new((Some(item), true))), }
     }
 
     pub fn empty() -> Self {
-        Self { inner: Arc::new(Lock::new(None)), }
+        Self { inner: Arc::new(spin::mutex::SpinMutex::new((None, true))), }
     }
 
-    pub fn give(self, item: T) {
+    pub fn give(&self, item: T) -> Option<T> {
         let mut guard = self.inner.lock();
-        debug_assert!(guard.is_none());
-        *guard = Some(item);
+        if guard.1 {
+            debug_assert!(guard.0.is_none());
+            guard.0 = Some(item);
+            None
+        } else {
+            Some(item)
+        }
     }
 
     pub fn try_take(&self) -> Option<T> {
-        self.inner.lock().take()
+        let mut guard = self.inner.lock();
+        guard.0.take().filter(|_| guard.1)
+    }
+
+    pub fn try_take_deactivate(&self) -> Option<T> {
+        let mut guard = self.inner.lock();
+        debug_assert_eq!(guard.1, true);
+        guard.1 = false;
+        guard.0.take().map(|item| item)
     }
 
     pub fn is_full(&self) -> bool {
-        self.inner.lock().is_some()
+        self.inner.lock().0.is_some()
     }
 }
