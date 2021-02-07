@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+# [0.10.2] - 2021-02-07
+
+### Fixed
+
+- Incorrect pointer comparison in `Selector` causing missing receives
+
 # [0.10.1] - 2020-12-30
 
 ### Removed

@@ -1,11 +1,11 @@
 [package]
 name = "flume"
-version = "0.10.1"
+version = "0.10.2"
 authors = ["Joshua Barretto <joshua.s.barretto@gmail.com>"]
 edition = "2018"
 description = "A blazingly fast multi-producer channel"
 repository = "https://github.com/zesterer/flume"
-keywords = ["mpsc", "fifo", "channel", "thread", "fast"]
+keywords = ["mpsc", "fifo", "channel", "thread", "mpmc"]
 categories = ["concurrency", "data-structures"]
 license = "Apache-2.0/MIT"
 readme = "README.md"
