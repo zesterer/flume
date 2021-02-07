@@ -282,7 +282,7 @@ impl<'a, T> Selector<'a, T> {
                     let hook: Arc<Hook<U, dyn Signal>> = hook;
                     wait_lock(&self.receiver.shared.chan)
                         .waiting
-                        .retain(|s| !Arc::ptr_eq(s, &hook));
+                        .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                     // If we were woken, but never polled, wake up another
                     if !self.received
                         && hook
