@@ -60,6 +60,8 @@ jobs:
         sudo add-apt-repository --remove ppa:ubuntu-toolchain-r/test
         sudo apt-get install g++-multilib
       if: matrix.build == 'linux32'
+    # Check build to fail fast
+    - run: cargo check --target ${{ matrix.target }}
     - run: cargo build --target ${{ matrix.target }}
     - run: cargo test --target ${{ matrix.target }}
     # FIXME(#41): Some timeout/deadline tests make more sense to run in release mode.

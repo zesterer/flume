@@ -309,7 +309,6 @@ fn robin() {
     }
 }
 
-#[cfg_attr(any(target_os = "macos", windows), ignore)] // FIXME #44
 #[cfg(feature = "select")]
 #[test]
 fn select_general() {
