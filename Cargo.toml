@@ -29,10 +29,10 @@ pin-project = { version = "1", optional = true }
 
 [dev-dependencies]
 #flume-test = { path = "../flume-test" }
-crossbeam-channel = "0.4"
-crossbeam-utils = "0.7"
+crossbeam-channel = "0.5.0"
+crossbeam-utils = "0.8.1"
 criterion = "0.3.1"
-rand = "0.7"
+rand = "0.8.3"
 async-std = { version = "1.5", features = ["attributes", "unstable"] }
 futures = { version = "^0.3", features = ["std"] }
 waker-fn = "1.1.0"
