@@ -47,6 +47,8 @@ flume = "x.y"
 Although Flume has its own extensive benchmarks, don't take it from here that Flume is quick.
 The following graph is from the `crossbeam-channel` benchmark suite.
 
+Tests were performed on an AMD Ryzen 7 3700x with 8/16 cores running Linux kernel 5.11.2 with the bfq scheduler.
+
 # <img src="misc/benchmarks.png" alt="Flume benchmarks (crossbeam benchmark suite)" width="100%"/>
 
 ## License
