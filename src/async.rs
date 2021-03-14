@@ -127,6 +127,8 @@ enum SendState<T> {
 }
 
 /// A future that sends a value into a channel.
+///
+/// Can be created via [`Sender::send_async`] or [`Sender::into_send_async`].
 #[pin_project(PinnedDrop)]
 pub struct SendFut<'a, T> {
     sender: OwnedOrRef<'a, Sender<T>>,
@@ -217,6 +219,8 @@ impl<'a, T> FusedFuture for SendFut<'a, T> {
 }
 
 /// A sink that allows sending values into a channel.
+///
+/// Can be created via [`Sender::sink`] or [`Sender::into_sink`].
 pub struct SendSink<'a, T>(SendFut<'a, T>);
 
 impl<'a, T> SendSink<'a, T> {
@@ -284,6 +288,8 @@ impl<T> Receiver<T> {
 }
 
 /// A future which allows asynchronously receiving a message.
+///
+/// Can be created via [`Receiver::recv_async`] or [`Receiver::into_recv_async`].
 pub struct RecvFut<'a, T> {
     receiver: OwnedOrRef<'a, Receiver<T>>,
     hook: Option<Arc<Hook<T, AsyncSignal>>>,
@@ -380,6 +386,8 @@ impl<'a, T> FusedFuture for RecvFut<'a, T> {
 }
 
 /// A stream which allows asynchronously receiving messages.
+///
+/// Can be created via [`Receiver::stream`] or [`Receiver::into_stream`].
 pub struct RecvStream<'a, T>(RecvFut<'a, T>);
 
 impl<'a, T> Clone for RecvStream<'a, T> {
