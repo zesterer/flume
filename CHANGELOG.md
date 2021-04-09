@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+# [0.10.3] - 2021-04-09
+
+### Fixed
+
+- Compilation error when enabling `select` without `eventual_fairness`
+
 # [0.10.2] - 2021-02-07
 
 ### Fixed

@@ -1,6 +1,6 @@
 [package]
 name = "flume"
-version = "0.10.2"
+version = "0.10.3"
 authors = ["Joshua Barretto <joshua.s.barretto@gmail.com>"]
 edition = "2018"
 description = "A blazingly fast multi-producer channel"
