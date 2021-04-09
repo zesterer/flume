@@ -1,8 +1,10 @@
 //! Types that permit waiting upon multiple blocking operations using the [`Selector`] interface.
 
 use crate::*;
-use nanorand::RNG;
 use std::{any::Any, marker::PhantomData};
+
+#[cfg(feature = "eventual-fairness")]
+use nanorand::RNG;
 
 // A unique token corresponding to an event in a selector
 type Token = usize;
