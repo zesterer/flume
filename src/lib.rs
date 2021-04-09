@@ -305,8 +305,8 @@ fn wait_lock<'a, T>(lock: &'a Spinlock<T>) -> SpinlockGuard<'a, T> {
             }
             thread::yield_now();
         }
-        // Sleep for at most 1 ms
-        thread::sleep(Duration::from_nanos((1 << i).min(1_000_000)));
+        // Sleep for at most ~1 ms
+        thread::sleep(Duration::from_nanos(1 << i.min(20)));
         i += 1;
     }
 }
