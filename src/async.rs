@@ -337,7 +337,12 @@ impl<'a, T> RecvFut<'a, T> {
                 // To avoid a missed wakeup, re-check disconnect status here because the channel might have
                 // gotten shut down before we had a chance to push our hook
                 if self.receiver.shared.is_disconnected() {
-                    Poll::Ready(Err(RecvError::Disconnected))
+                    // And now, to avoid a race condition between the first recv attempt and the disconnect check we
+                    // just performed, attempt to recv again just in case we missed something.
+                    Poll::Ready(self.receiver.shared
+                        .recv_sync(None)
+                        .map(Ok)
+                        .unwrap_or(Err(RecvError::Disconnected)))
                 } else {
                     Poll::Pending
                 }
