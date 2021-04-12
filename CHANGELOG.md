@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+# [0.10.4] - 2021-04-12
+
+### Fixed
+
+- Shutdown-related race condition with async recv that caused spurious errors
+
 # [0.10.3] - 2021-04-09
 
 ### Fixed
