@@ -148,6 +148,31 @@ impl<'a, T> SendFut<'a, T> {
                 .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
         }
     }
+
+    /// See [`Sender::is_disconnected`].
+    pub fn is_disconnected(&self) -> bool {
+        self.sender.is_disconnected()
+    }
+
+    /// See [`Sender::is_empty`].
+    pub fn is_empty(&self) -> bool {
+        self.sender.is_empty()
+    }
+
+    /// See [`Sender::is_full`].
+    pub fn is_full(&self) -> bool {
+        self.sender.is_full()
+    }
+
+    /// See [`Sender::len`].
+    pub fn len(&self) -> usize {
+        self.sender.len()
+    }
+
+    /// See [`Sender::capacity`].
+    pub fn capacity(&self) -> Option<usize> {
+        self.sender.capacity()
+    }
 }
 
 #[pinned_drop]
@@ -224,8 +249,29 @@ impl<'a, T> FusedFuture for SendFut<'a, T> {
 pub struct SendSink<'a, T>(SendFut<'a, T>);
 
 impl<'a, T> SendSink<'a, T> {
+    /// See [`Sender::is_disconnected`].
     pub fn is_disconnected(&self) -> bool {
-        self.0.is_terminated()
+        self.0.is_disconnected()
+    }
+
+    /// See [`Sender::is_empty`].
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// See [`Sender::is_full`].
+    pub fn is_full(&self) -> bool {
+        self.0.is_full()
+    }
+
+    /// See [`Sender::len`].
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// See [`Sender::capacity`].
+    pub fn capacity(&self) -> Option<usize> {
+        self.0.capacity()
     }
 }
 
@@ -368,6 +414,31 @@ impl<'a, T> RecvFut<'a, T> {
                 }))
         }
     }
+
+    /// See [`Receiver::is_disconnected`].
+    pub fn is_disconnected(&self) -> bool {
+        self.receiver.is_disconnected()
+    }
+
+    /// See [`Receiver::is_empty`].
+    pub fn is_empty(&self) -> bool {
+        self.receiver.is_empty()
+    }
+
+    /// See [`Receiver::is_full`].
+    pub fn is_full(&self) -> bool {
+        self.receiver.is_full()
+    }
+
+    /// See [`Receiver::len`].
+    pub fn len(&self) -> usize {
+        self.receiver.len()
+    }
+
+    /// See [`Receiver::capacity`].
+    pub fn capacity(&self) -> Option<usize> {
+        self.receiver.capacity()
+    }
 }
 
 impl<'a, T> Drop for RecvFut<'a, T> {
@@ -394,6 +465,33 @@ impl<'a, T> FusedFuture for RecvFut<'a, T> {
 ///
 /// Can be created via [`Receiver::stream`] or [`Receiver::into_stream`].
 pub struct RecvStream<'a, T>(RecvFut<'a, T>);
+
+impl<'a, T> RecvStream<'a, T> {
+    /// See [`Receiver::is_disconnected`].
+    pub fn is_disconnected(&self) -> bool {
+        self.0.is_disconnected()
+    }
+
+    /// See [`Receiver::is_empty`].
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// See [`Receiver::is_full`].
+    pub fn is_full(&self) -> bool {
+        self.0.is_full()
+    }
+
+    /// See [`Receiver::len`].
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// See [`Receiver::capacity`].
+    pub fn capacity(&self) -> Option<usize> {
+        self.0.capacity()
+    }
+}
 
 impl<'a, T> Clone for RecvStream<'a, T> {
     fn clone(&self) -> RecvStream<'a, T> {
