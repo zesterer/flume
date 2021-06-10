@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+# [0.10.6] - 2021-06-10
+
+### Added
+
+- `fn into_inner(self) -> T` for send errors, allowing for easy access to the unsent message
+
 # [0.10.5] - 2021-04-26
 
 ### Added
