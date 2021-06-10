@@ -87,8 +87,9 @@ pub enum TrySendError<T> {
 impl<T> TrySendError<T> {
     /// Consume the error, yielding the message that failed to send.
     pub fn into_inner(self) -> T {
-        let (Self::Full(msg) | Self::Disconnected(msg)) = self;
-        msg
+        match self {
+            Self::Full(msg) | Self::Disconnected(msg) => msg,
+        }
     }
 }
 
@@ -125,8 +126,9 @@ pub enum SendTimeoutError<T> {
 impl<T> SendTimeoutError<T> {
     /// Consume the error, yielding the message that failed to send.
     pub fn into_inner(self) -> T {
-        let (Self::Timeout(msg) | Self::Disconnected(msg)) = self;
-        msg
+        match self {
+            Self::Timeout(msg) | Self::Disconnected(msg) => msg,
+        }
     }
 }
 
