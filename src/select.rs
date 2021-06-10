@@ -41,6 +41,7 @@ trait Selection<'a, T> {
 /// An error that may be emitted when attempting to wait for a value on a receiver.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SelectError {
+    /// A timeout occurred when waiting on a `Selector`.
     Timeout,
 }
 

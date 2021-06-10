@@ -25,6 +25,8 @@
 //! assert_eq!(rx.recv().unwrap(), 42);
 //! ```
 
+#![deny(missing_docs)]
+
 #[cfg(feature = "select")]
 pub mod select;
 #[cfg(feature = "async")]
@@ -53,6 +55,11 @@ use crate::signal::{Signal, SyncSignal};
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct SendError<T>(pub T);
 
+impl<T> SendError<T> {
+    /// Consume the error, yielding the message that failed to send.
+    pub fn into_inner(self) -> T { self.0 }
+}
+
 impl<T> fmt::Debug for SendError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         "SendError(..)".fmt(f)
@@ -71,8 +78,18 @@ impl<T> std::error::Error for SendError<T> {}
 /// the channel is full or all receivers are dropped.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum TrySendError<T> {
+    /// The channel the message is sent on has a finite capacity and was full when the send was attempted.
     Full(T),
+    /// All channel receivers were dropped and so the message has nobody to receive it.
     Disconnected(T),
+}
+
+impl<T> TrySendError<T> {
+    /// Consume the error, yielding the message that failed to send.
+    pub fn into_inner(self) -> T {
+        let (Self::Full(msg) | Self::Disconnected(msg)) = self;
+        msg
+    }
 }
 
 impl<T> fmt::Debug for TrySendError<T> {
@@ -99,8 +116,18 @@ impl<T> std::error::Error for TrySendError<T> {}
 /// the send operation times out or all receivers are dropped.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum SendTimeoutError<T> {
+    /// A timeout occurred when attempting to send the message.
     Timeout(T),
+    /// All channel receivers were dropped and so the message has nobody to receive it.
     Disconnected(T),
+}
+
+impl<T> SendTimeoutError<T> {
+    /// Consume the error, yielding the message that failed to send.
+    pub fn into_inner(self) -> T {
+        let (Self::Timeout(msg) | Self::Disconnected(msg)) = self;
+        msg
+    }
 }
 
 impl<T> fmt::Debug for SendTimeoutError<T> {
@@ -130,6 +157,7 @@ enum TrySendTimeoutError<T> {
 /// are dropped and there are no more messages in the channel.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RecvError {
+    /// All senders were dropped and no messages are waiting in the channel, so no further messages can be received.
     Disconnected,
 }
 
@@ -148,7 +176,9 @@ impl std::error::Error for RecvError {}
 /// then `TryRecvError::Disconnected` will be returned.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TryRecvError {
+    /// The channel was empty when the receive was attempted.
     Empty,
+    /// All senders were dropped and no messages are waiting in the channel, so no further messages can be received.
     Disconnected,
 }
 
@@ -168,7 +198,9 @@ impl std::error::Error for TryRecvError {}
 /// in the channel.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RecvTimeoutError {
+    /// A timeout occurred when attempting to receive a message.
     Timeout,
+    /// All senders were dropped and no messages are waiting in the channel, so no further messages can be received.
     Disconnected,
 }
 
