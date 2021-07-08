@@ -583,9 +583,9 @@ impl<T> Shared<T> {
 
         let mut chan = wait_lock(&self.chan);
         chan.pull_pending(false);
-        chan.sending.as_ref().map(|(_, sending)| sending.iter().for_each(|hook| {
+        if let Some((_, sending)) = chan.sending.as_ref() { sending.iter().for_each(|hook| {
             hook.signal().fire();
-        }));
+        }) }
         chan.waiting.iter().for_each(|hook| { hook.signal().fire(); });
     }
 
