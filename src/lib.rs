@@ -521,7 +521,7 @@ impl<T> Shared<T> {
         let mut chan = wait_lock(&self.chan);
         chan.pull_pending(true);
 
-        let res = if let Some(msg) = chan.queue.pop_front() {
+        if let Some(msg) = chan.queue.pop_front() {
             drop(chan);
             Ok(msg).into()
         } else if self.is_disconnected() {
@@ -536,9 +536,7 @@ impl<T> Shared<T> {
         } else {
             drop(chan);
             Err(TryRecvTimeoutError::Empty).into()
-        };
-
-        res
+        }
     }
 
     fn recv_sync(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
