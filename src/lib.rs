@@ -359,10 +359,12 @@ type ChanLock<T> = Spinlock<T>;
 #[cfg(windows)]
 type ChanLock<T> = Mutex<T>;
 
+
+type SignalVec<T> = VecDeque<Arc<Hook<T, dyn signal::Signal>>>;
 struct Chan<T> {
-    sending: Option<(usize, VecDeque<Arc<Hook<T, dyn signal::Signal>>>)>,
+    sending: Option<(usize, SignalVec<T>)>,
     queue: VecDeque<T>,
-    waiting: VecDeque<Arc<Hook<T, dyn signal::Signal>>>,
+    waiting: SignalVec<T>,
 }
 
 impl<T> Chan<T> {
@@ -580,13 +582,17 @@ impl<T> Shared<T> {
     /// msgs that have already been sent)
     fn disconnect_all(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
-
+    
         let mut chan = wait_lock(&self.chan);
         chan.pull_pending(false);
-        if let Some((_, sending)) = chan.sending.as_ref() { sending.iter().for_each(|hook| {
+        if let Some((_, sending)) = chan.sending.as_ref() {
+            sending.iter().for_each(|hook| {
+                hook.signal().fire();
+            })
+        }
+        chan.waiting.iter().for_each(|hook| {
             hook.signal().fire();
-        }) }
-        chan.waiting.iter().for_each(|hook| { hook.signal().fire(); });
+        });
     }
 
     fn is_disconnected(&self) -> bool {

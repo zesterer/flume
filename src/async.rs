@@ -175,6 +175,7 @@ impl<'a, T> SendFut<'a, T> {
     }
 }
 
+#[allow(clippy::needless_lifetimes)] // False positive, see https://github.com/rust-lang/rust-clippy/issues/5787
 #[pinned_drop]
 impl<'a, T> PinnedDrop for SendFut<'a, T> {
     fn drop(mut self: Pin<&mut Self>) {
