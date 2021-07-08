@@ -330,7 +330,7 @@ impl<T> Hook<T, SyncSignal> {
 
 #[inline]
 #[cfg(not(windows))]
-fn wait_lock<'a, T>(lock: &'a Spinlock<T>) -> SpinlockGuard<'a, T> {
+fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
     let mut i = 4;
     loop {
         for _ in 0..10 {
