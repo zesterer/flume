@@ -330,7 +330,7 @@ impl<T> Hook<T, SyncSignal> {
 
 #[inline]
 #[cfg(not(windows))]
-fn wait_lock<'a, T>(lock: &'a Spinlock<T>) -> SpinlockGuard<'a, T> {
+fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
     let mut i = 4;
     loop {
         for _ in 0..10 {
@@ -359,10 +359,12 @@ type ChanLock<T> = Spinlock<T>;
 #[cfg(windows)]
 type ChanLock<T> = Mutex<T>;
 
+
+type SignalVec<T> = VecDeque<Arc<Hook<T, dyn signal::Signal>>>;
 struct Chan<T> {
-    sending: Option<(usize, VecDeque<Arc<Hook<T, dyn signal::Signal>>>)>,
+    sending: Option<(usize, SignalVec<T>)>,
     queue: VecDeque<T>,
-    waiting: VecDeque<Arc<Hook<T, dyn signal::Signal>>>,
+    waiting: SignalVec<T>,
 }
 
 impl<T> Chan<T> {
@@ -521,7 +523,7 @@ impl<T> Shared<T> {
         let mut chan = wait_lock(&self.chan);
         chan.pull_pending(true);
 
-        let res = if let Some(msg) = chan.queue.pop_front() {
+        if let Some(msg) = chan.queue.pop_front() {
             drop(chan);
             Ok(msg).into()
         } else if self.is_disconnected() {
@@ -536,9 +538,7 @@ impl<T> Shared<T> {
         } else {
             drop(chan);
             Err(TryRecvTimeoutError::Empty).into()
-        };
-
-        res
+        }
     }
 
     fn recv_sync(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
@@ -582,13 +582,17 @@ impl<T> Shared<T> {
     /// msgs that have already been sent)
     fn disconnect_all(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
-
+    
         let mut chan = wait_lock(&self.chan);
         chan.pull_pending(false);
-        chan.sending.as_ref().map(|(_, sending)| sending.iter().for_each(|hook| {
+        if let Some((_, sending)) = chan.sending.as_ref() {
+            sending.iter().for_each(|hook| {
+                hook.signal().fire();
+            })
+        }
+        chan.waiting.iter().for_each(|hook| {
             hook.signal().fire();
-        }));
-        chan.waiting.iter().for_each(|hook| { hook.signal().fire(); });
+        });
     }
 
     fn is_disconnected(&self) -> bool {
