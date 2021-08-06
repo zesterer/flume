@@ -24,7 +24,7 @@ default = ["async", "select", "eventual-fairness"]
 spinning_top = "0.2"
 futures-sink = { version = "0.3", default_features = false, optional = true }
 futures-core = { version = "0.3", default_features = false, optional = true }
-nanorand = { version = "0.5", features = ["getrandom"], optional = true }
+nanorand = { version = "0.6", features = ["getrandom"], optional = true }
 pin-project = { version = "1", optional = true }
 
 [dev-dependencies]

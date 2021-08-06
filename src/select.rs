@@ -4,7 +4,7 @@ use crate::*;
 use std::{any::Any, marker::PhantomData};
 
 #[cfg(feature = "eventual-fairness")]
-use nanorand::RNG;
+use nanorand::Rng;
 
 // A unique token corresponding to an event in a selector
 type Token = usize;
@@ -319,7 +319,7 @@ impl<'a, T> Selector<'a, T> {
     fn wait_inner(mut self, deadline: Option<Instant>) -> Option<T> {
         #[cfg(feature = "eventual-fairness")]
         {
-            self.next_poll = self.rng.generate_range(0, self.selections.len());
+            self.next_poll = self.rng.generate_range(0..self.selections.len());
         }
 
         let res = 'outer: loop {
