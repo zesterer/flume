@@ -47,7 +47,7 @@ use std::{
     fmt,
 };
 
-use spinning_top::{Spinlock, SpinlockGuard};
+use spin::{Mutex as Spinlock, MutexGuard as SpinlockGuard};
 use crate::signal::{Signal, SyncSignal};
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender when
