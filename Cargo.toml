@@ -22,7 +22,6 @@ default = ["async", "select", "eventual-fairness"]
 
 [dependencies]
 spin = { version = "0.9.2", features = ["mutex"] }
-#spin = {version = "0.6.0", default-features = false}
 futures-sink = { version = "0.3", default_features = false, optional = true }
 futures-core = { version = "0.3", default_features = false, optional = true }
 nanorand = { version = "0.6", features = ["getrandom"], optional = true }
