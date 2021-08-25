@@ -15,7 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-# [0.10.8] - 2021-09-06
+# [0.10.9] - 2021-08-25
+
+### Changed
+
+- Switched from `spinning_top` to `spin`
+
+# [0.10.8] - 2021-08-06
 
 ### Changed
 

@@ -1,6 +1,6 @@
 [package]
 name = "flume"
-version = "0.10.8"
+version = "0.10.9"
 authors = ["Joshua Barretto <joshua.s.barretto@gmail.com>"]
 edition = "2018"
 description = "A blazingly fast multi-producer channel"
@@ -30,7 +30,7 @@ pin-project = { version = "1", optional = true }
 [dev-dependencies]
 #flume-test = { path = "../flume-test" }
 crossbeam-channel = "0.5.1"
-crossbeam-utils = "0.8.3"
+crossbeam-utils = "0.8.5"
 criterion = "0.3.4"
 rand = "0.8.3"
 async-std = { version = "1.9.0", features = ["attributes", "unstable"] }
