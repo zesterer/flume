@@ -729,7 +729,7 @@ pub struct Receiver<T> {
 
 impl<T> Receiver<T> {
     /// Attempt to fetch an incoming value from the channel associated with this receiver,
-    /// returning an error if the channel is empty.
+    /// returning an error if the channel is empty or if all senders have been dropped.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.shared.recv_sync(None).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => TryRecvError::Disconnected,
