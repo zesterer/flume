@@ -113,6 +113,14 @@ impl<T> fmt::Display for TrySendError<T> {
 
 impl<T> std::error::Error for TrySendError<T> {}
 
+impl<T> From<SendError<T>> for TrySendError<T> {
+    fn from(err: SendError<T>) -> Self {
+        match err {
+            SendError(item) => Self::Disconnected(item),
+        }
+    }
+}
+
 /// An error that may be emitted when sending a value into a channel on a sender with a timeout when
 /// the send operation times out or all receivers are dropped.
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -148,6 +156,14 @@ impl<T> fmt::Display for SendTimeoutError<T> {
 }
 
 impl<T> std::error::Error for SendTimeoutError<T> {}
+
+impl<T> From<SendError<T>> for SendTimeoutError<T> {
+    fn from(err: SendError<T>) -> Self {
+        match err {
+            SendError(item) => Self::Disconnected(item),
+        }
+    }
+}
 
 enum TrySendTimeoutError<T> {
     Full(T),
@@ -195,6 +211,14 @@ impl fmt::Display for TryRecvError {
 
 impl std::error::Error for TryRecvError {}
 
+impl From<RecvError> for TryRecvError {
+    fn from(err: RecvError) -> Self {
+        match err {
+            RecvError::Disconnected => Self::Disconnected,
+        }
+    }
+}
+
 /// An error that may be emitted when attempting to wait for a value on a receiver with a timeout
 /// when the receive operation times out or all senders are dropped and there are no values left
 /// in the channel.
@@ -216,6 +240,14 @@ impl fmt::Display for RecvTimeoutError {
 }
 
 impl std::error::Error for RecvTimeoutError {}
+
+impl From<RecvError> for RecvTimeoutError {
+    fn from(err: RecvError) -> Self {
+        match err {
+            RecvError::Disconnected => Self::Disconnected,
+        }
+    }
+}
 
 enum TryRecvTimeoutError {
     Empty,
