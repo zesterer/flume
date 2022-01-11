@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+# [0.10.10] - 2022-01-11
+
+### Added
+
+- `From<SendError>` and `From<RecvError>` impls for other error types
+- Marked futures as `#[must_use]`
+
+### Changes
+
+- Switched to scheduler-driven locking by default, with a `spin` feature to reenable the old behaviour
+- Minor doc improvements
+
 # [0.10.9] - 2021-08-25
 
 ### Changed
