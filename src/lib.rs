@@ -47,7 +47,7 @@ use std::{
     fmt,
 };
 
-use spin::{Mutex as Spinlock, MutexGuard as SpinlockGuard};
+use spin1::{Mutex as Spinlock, MutexGuard as SpinlockGuard};
 use crate::signal::{Signal, SyncSignal};
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender when
@@ -360,8 +360,8 @@ impl<T> Hook<T, SyncSignal> {
     }
 }
 
+#[cfg(feature = "spin")]
 #[inline]
-#[cfg(not(windows))]
 fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
     let mut i = 4;
     loop {
@@ -377,18 +377,18 @@ fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
     }
 }
 
+#[cfg(not(feature = "spin"))]
 #[inline]
-#[cfg(windows)]
 fn wait_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
     lock.lock().unwrap()
 }
 
-#[cfg(windows)]
+#[cfg(not(feature = "spin"))]
 use std::sync::{Mutex, MutexGuard};
 
-#[cfg(not(windows))]
+#[cfg(feature = "spin")]
 type ChanLock<T> = Spinlock<T>;
-#[cfg(windows)]
+#[cfg(not(feature = "spin"))]
 type ChanLock<T> = Mutex<T>;
 
 
@@ -614,7 +614,7 @@ impl<T> Shared<T> {
     /// msgs that have already been sent)
     fn disconnect_all(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
-    
+
         let mut chan = wait_lock(&self.chan);
         chan.pull_pending(false);
         if let Some((_, sending)) = chan.sending.as_ref() {
