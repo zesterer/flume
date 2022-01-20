@@ -798,7 +798,7 @@ impl<T> Receiver<T> {
     /// Create a blocking iterator over the values received on the channel that finishes iteration
     /// when all senders have been dropped.
     ///
-    /// See also [`Receiver::into_iter`]
+    /// You can also create a self-owned iterator with [`Receiver::into_iter`].
     pub fn iter(&self) -> Iter<T> {
         Iter { receiver: &self }
     }
@@ -878,11 +878,11 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
+/// This exists as a shorthand for [`Receiver::iter`].
 impl<'a, T> IntoIterator for &'a Receiver<T> {
     type Item = T;
     type IntoIter = Iter<'a, T>;
 
-    /// It is equivalent to [`Receiver::iter`]
     fn into_iter(self) -> Self::IntoIter {
         Iter { receiver: self }
     }
@@ -892,7 +892,7 @@ impl<T> IntoIterator for Receiver<T> {
     type Item = T;
     type IntoIter = IntoIter<T>;
 
-    /// This method creates a self-owned alternative to [`Receiver::iter`]
+    /// Creates a self-owned but semantically equivalent alternative to [`Receiver::iter`].
     fn into_iter(self) -> Self::IntoIter {
         IntoIter { receiver: self }
     }
