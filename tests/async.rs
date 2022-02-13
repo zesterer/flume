@@ -245,3 +245,32 @@ fn change_waker() {
         assert_eq!(waker2.woken(), 1);
     }
 }
+
+#[cfg(feature = "async")]
+#[test]
+fn spsc_single_threaded_value_ordering() {
+    async fn test() {
+        let (tx, rx) = flume::bounded(4);
+        tokio::select! {
+        _ = producer(tx) => {},
+        _ = consumer(rx) => {},
+    }
+    }
+
+    async fn producer(tx: flume::Sender<usize>) {
+        for i in 0..100 {
+            tx.send_async(i).await.unwrap();
+        }
+    }
+
+    async fn consumer(rx: flume::Receiver<usize>) {
+        let mut expected = 0;
+        while let Ok(value) = rx.recv_async().await {
+            assert_eq!(value, expected);
+            expected += 1;
+        }
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    rt.block_on(test());
+}
