@@ -465,7 +465,7 @@ impl<T> Shared<T> {
                     None if msg.is_none() => break,
                     // No more waiting receivers, so add msg to queue and break out of the loop
                     None => {
-                        chan.queue.push_front(msg.unwrap());
+                        chan.queue.push_back(msg.unwrap());
                         break;
                     }
                     Some((Some(m), signal)) => {
@@ -477,7 +477,7 @@ impl<T> Shared<T> {
                         } else {
                             // Was async and not a stream, so it did acquire the message. Push the
                             // message to the queue for it to be received.
-                            chan.queue.push_front(m);
+                            chan.queue.push_back(m);
                             drop(chan);
                             break;
                         }
