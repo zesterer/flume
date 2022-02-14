@@ -38,6 +38,7 @@ rand = "0.8.3"
 async-std = { version = "1.9.0", features = ["attributes", "unstable"] }
 futures = { version = "^0.3", features = ["std"] }
 waker-fn = "1.1.0"
+tokio = { version = "^1.16.1", features = ["rt", "macros"] }
 
 [[bench]]
 name = "basic"
