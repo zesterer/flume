@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+# [0.10.11] - 2022-02-14
+
+### Fixed
+
+- Out-of-order bug when using channels asynchronously
+
 # [0.10.10] - 2022-01-11
 
 ### Added
