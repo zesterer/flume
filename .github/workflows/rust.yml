@@ -13,16 +13,16 @@ jobs:
       RUST_BACKTRACE: 1
     strategy:
       matrix:
-        build: [linux64, linux32, macos, win32, win64]
+        build: [linux64, macos, win32, win64]
         include:
           - build: linux64
             os: ubuntu-latest
             channel: stable
             target: x86_64-unknown-linux-gnu
-          - build: linux32
-            os: ubuntu-latest
-            channel: stable
-            target: i686-unknown-linux-gnu
+          #- build: linux32
+          #  os: ubuntu-latest
+          #  channel: stable
+          #  target: i686-unknown-linux-gnu
           - build: macos
             os: macos-latest
             channel: stable
@@ -49,17 +49,6 @@ jobs:
         cargo -V
         rustup show
       shell: bash
-    # copy from <https://git.io/JUGmV>.
-    - name: Install g++-multilib
-      run: |
-        set -e
-        # Remove the ubuntu-toolchain-r/test PPA, which is added by default.
-        # Some packages were removed, and this is causing the g++multilib
-        # install to fail. Similar issue:
-        # https://github.com/scikit-learn/scikit-learn/issues/13928.
-        sudo add-apt-repository --remove ppa:ubuntu-toolchain-r/test
-        sudo apt-get install g++-multilib
-      if: matrix.build == 'linux32'
     # Check build to fail fast
     - run: cargo check --target ${{ matrix.target }}
     - run: cargo build --target ${{ matrix.target }}
