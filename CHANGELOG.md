@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+# [0.10.13] - 2022-06-10
+
+### Added
+
+- `SendSink::sender`, to get the sender of a `SendSink`
+
 # [0.10.12] - 2022-03-10
 
 ### Changed
