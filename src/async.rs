@@ -251,6 +251,11 @@ impl<'a, T> FusedFuture for SendFut<'a, T> {
 pub struct SendSink<'a, T>(SendFut<'a, T>);
 
 impl<'a, T> SendSink<'a, T> {
+    /// Returns a clone of a sending half of the channel of this sink.
+    pub fn sender(&self) -> &Sender<T> {
+        &self.0.sender
+    }
+
     /// See [`Sender::is_disconnected`].
     pub fn is_disconnected(&self) -> bool {
         self.0.is_disconnected()
