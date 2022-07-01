@@ -31,8 +31,8 @@ pin-project = { version = "1", optional = true }
 
 [dev-dependencies]
 #flume-test = { path = "../flume-test" }
-crossbeam-channel = "0.5.1"
-crossbeam-utils = "0.8.5"
+crossbeam-channel = "0.5.5"
+crossbeam-utils = "0.8.10"
 criterion = "0.3.4"
 rand = "0.8.3"
 async-std = { version = "1.9.0", features = ["attributes", "unstable"] }
