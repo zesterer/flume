@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+# [0.10.14] - 2022-07-21
+
+### Fixed
+
+- Fixed unbounded memory usage in `RecvFut::poll_inner`
+
 # [0.10.13] - 2022-06-10
 
 ### Added
