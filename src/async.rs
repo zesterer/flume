@@ -40,16 +40,21 @@ impl Signal for AsyncSignal {
 }
 
 impl<T> Hook<T, AsyncSignal> {
-    fn update_waker(&self, cx_waker: &Waker) {
-        if !self.1.waker.lock().will_wake(cx_waker) {
-            *self.1.waker.lock() = cx_waker.clone();
+    // Update the hook to point to the given Waker.
+    // Returns whether the hook has been previously awakened
+    fn update_waker(&self, cx_waker: &Waker) -> bool {
+        let mut waker = self.1.waker.lock();
+        let woken = self.1.woken.load(Ordering::SeqCst);
+        if !waker.will_wake(cx_waker) {
+            *waker = cx_waker.clone();
 
             // Avoid the edge case where the waker was woken just before the wakers were
             // swapped.
-            if self.1.woken.load(Ordering::SeqCst) {
+            if woken {
                 cx_waker.wake_by_ref();
             }
         }
+        woken
     }
 }
 
@@ -227,7 +232,7 @@ impl<'a, T> Future for SendFut<'a, T> {
                 |hook| {
                     **this_hook = Some(SendState::QueuedItem(hook));
                     Poll::Pending
-                }
+                },
             )
                 .map(|r| r.map_err(|err| match err {
                     TrySendTimeoutError::Disconnected(msg) => SendError(msg),
@@ -309,7 +314,7 @@ impl<'a, T> Clone for SendSink<'a, T> {
     fn clone(&self) -> SendSink<'a, T> {
         SendSink(SendFut {
             sender: self.0.sender.clone(),
-            hook: None
+            hook: None,
         })
     }
 }
@@ -377,7 +382,7 @@ impl<'a, T> RecvFut<'a, T> {
     fn poll_inner(
         self: Pin<&mut Self>,
         cx: &mut Context,
-        stream: bool
+        stream: bool,
     ) -> Poll<Result<T, RecvError>> {
         if self.hook.is_some() {
             if let Ok(msg) = self.receiver.shared.recv_sync(None) {
@@ -386,8 +391,11 @@ impl<'a, T> RecvFut<'a, T> {
                 Poll::Ready(Err(RecvError::Disconnected))
             } else {
                 let hook = self.hook.as_ref().map(Arc::clone).unwrap();
-                hook.update_waker(cx.waker());
-                wait_lock(&self.receiver.shared.chan).waiting.push_back(hook);
+                if hook.update_waker(cx.waker()) {
+                    // If the previous hook was awakened, we need to insert it back to the
+                    // queue, otherwise, it remains valid.
+                    wait_lock(&self.receiver.shared.chan).waiting.push_back(hook);
+                }
                 // To avoid a missed wakeup, re-check disconnect status here because the channel might have
                 // gotten shut down before we had a chance to push our hook
                 if self.receiver.shared.is_disconnected() {
@@ -414,7 +422,7 @@ impl<'a, T> RecvFut<'a, T> {
                 |hook| {
                     *this_hook = Some(hook);
                     Poll::Pending
-                }
+                },
             )
                 .map(|r| r.map_err(|err| match err {
                     TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
@@ -516,7 +524,7 @@ impl<'a, T> Stream for RecvStream<'a, T> {
             Poll::Ready(item) => {
                 self.0.reset_hook();
                 Poll::Ready(item.ok())
-            },
+            }
         }
     }
 }
