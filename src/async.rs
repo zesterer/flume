@@ -181,6 +181,12 @@ impl<'a, T> SendFut<'a, T> {
     }
 }
 
+impl<'a, T> std::fmt::Debug for SendFut<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendFut").finish()
+    }
+}
+
 impl<'a, T> Drop for SendFut<'a, T> {
     fn drop(&mut self) {
         self.reset_hook()
@@ -242,6 +248,7 @@ impl<'a, T> FusedFuture for SendFut<'a, T> {
 /// A sink that allows sending values into a channel.
 ///
 /// Can be created via [`Sender::sink`] or [`Sender::into_sink`].
+#[derive(Debug)]
 pub struct SendSink<'a, T>(SendFut<'a, T>);
 
 impl<'a, T> SendSink<'a, T> {
@@ -446,6 +453,12 @@ impl<'a, T> RecvFut<'a, T> {
     }
 }
 
+impl<'a, T> std::fmt::Debug for RecvFut<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecvFut").finish()
+    }
+}
+
 impl<'a, T> Drop for RecvFut<'a, T> {
     fn drop(&mut self) {
         self.reset_hook();
@@ -469,6 +482,7 @@ impl<'a, T> FusedFuture for RecvFut<'a, T> {
 /// A stream which allows asynchronously receiving messages.
 ///
 /// Can be created via [`Receiver::stream`] or [`Receiver::into_stream`].
+#[derive(Debug)]
 pub struct RecvStream<'a, T>(RecvFut<'a, T>);
 
 impl<'a, T> RecvStream<'a, T> {
