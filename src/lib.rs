@@ -40,7 +40,7 @@ pub use select::Selector;
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}},
+    sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}, Weak},
     time::{Duration, Instant},
     marker::PhantomData,
     thread,
@@ -724,6 +724,16 @@ impl<T> Sender<T> {
     pub fn capacity(&self) -> Option<usize> {
         self.shared.capacity()
     }
+
+    /// Creates a [`WeakSender`] that does not keep the channel open.
+    ///
+    /// The channel is closed once all `Sender`s are dropped, even if there
+    /// are still active `WeakSender`s.
+    pub fn downgrade(&self) -> WeakSender<T> {
+        WeakSender {
+            shared: Arc::downgrade(&self.shared),
+        }
+    }
 }
 
 impl<T> Clone for Sender<T> {
@@ -747,6 +757,45 @@ impl<T> Drop for Sender<T> {
         if self.shared.sender_count.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.shared.disconnect_all();
         }
+    }
+}
+
+/// A sender that does not prevent the channel from being closed.
+///
+/// Weak senders do not count towards the number of active senders on the channel. As soon as
+/// all normal [`Sender`]s are dropped, the channel is closed, even if there is still a
+/// `WeakSender`.
+///
+/// To send messages, a `WeakSender` must first be upgraded to a `Sender` using the [`upgrade`]
+/// method.
+pub struct WeakSender<T> {
+    shared: Weak<Shared<T>>,
+}
+
+impl<T> WeakSender<T> {
+    /// Tries to upgrade the `WeakSender` to a [`Sender`], in order to send messages.
+    ///
+    /// Returns `None` if the channel was closed already. Note that a `Some` return value
+    /// does not guarantee that the channel is still open.
+    pub fn upgrade(&self) -> Option<Sender<T>> {
+        self.shared
+            .upgrade()
+            // check that there are still live senders
+            .filter(|shared| {
+                shared
+                    .sender_count
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                        if count == 0 {
+                            // all senders are closed already -> don't increase the sender count
+                            None
+                        } else {
+                            // there is still at least one active sender
+                            Some(count + 1)
+                        }
+                    })
+                    .is_ok()
+            })
+            .map(|shared| Sender { shared })
     }
 }
 

@@ -405,3 +405,24 @@ fn std_error_without_debug() {
         }
     }
 }
+
+#[test]
+fn weak_close() {
+    let (tx, rx) = unbounded::<()>();
+    let weak = tx.downgrade();
+    drop(tx);
+    assert!(weak.upgrade().is_none());
+    assert!(rx.is_disconnected());
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn weak_upgrade() {
+    let (tx, rx) = unbounded();
+    let weak = tx.downgrade();
+    let tx2 = weak.upgrade().unwrap();
+    drop(tx);
+    assert!(!rx.is_disconnected());
+    tx2.send(()).unwrap();
+    assert!(rx.try_recv().is_ok());
+}
