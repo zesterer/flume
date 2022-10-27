@@ -227,10 +227,10 @@ fn rendezvous() {
             tx.send(()).unwrap();
             let now = Instant::now();
 
-            assert!(now.duration_since(then) > Duration::from_millis(50), "iter = {}", i);
+            assert!(now.duration_since(then) > Duration::from_millis(100), "iter = {}", i);
         });
 
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(1000));
         rx.recv().unwrap();
 
         t.join().unwrap();
