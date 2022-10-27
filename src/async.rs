@@ -10,7 +10,6 @@ use std::{
 use crate::*;
 use futures_core::{stream::{Stream, FusedStream}, future::FusedFuture};
 use futures_sink::Sink;
-use pin_project::{pin_project, pinned_drop};
 
 struct AsyncSignal {
     waker: Spinlock<Waker>,
@@ -135,12 +134,13 @@ enum SendState<T> {
 ///
 /// Can be created via [`Sender::send_async`] or [`Sender::into_send_async`].
 #[must_use = "futures/streams/sinks do nothing unless you `.await` or poll them"]
-#[pin_project(PinnedDrop)]
 pub struct SendFut<'a, T> {
     sender: OwnedOrRef<'a, Sender<T>>,
     // Only none after dropping
     hook: Option<SendState<T>>,
 }
+
+impl<T> std::marker::Unpin for SendFut<'_, T> {}
 
 impl<'a, T> SendFut<'a, T> {
     /// Reset the hook, clearing it and removing it from the waiting sender's queue. This is called
@@ -181,19 +181,12 @@ impl<'a, T> SendFut<'a, T> {
     }
 }
 
-#[allow(clippy::needless_lifetimes)] // False positive, see https://github.com/rust-lang/rust-clippy/issues/5787
-#[pinned_drop]
-impl<'a, T> PinnedDrop for SendFut<'a, T> {
-    fn drop(mut self: Pin<&mut Self>) {
+impl<'a, T> Drop for SendFut<'a, T> {
+    fn drop(&mut self) {
         self.reset_hook()
     }
 }
 
-// impl<'a, T> Drop for SendFut<'a, T> {
-//     fn drop(&mut self) {
-//         self.reset_hook()
-//     }
-// }
 
 impl<'a, T> Future for SendFut<'a, T> {
     type Output = Result<(), SendError<T>>;
@@ -203,34 +196,30 @@ impl<'a, T> Future for SendFut<'a, T> {
             if hook.is_empty() {
                 Poll::Ready(Ok(()))
             } else if self.sender.shared.is_disconnected() {
-                match self.hook.take().unwrap() {
-                    SendState::NotYetSent(item) => Poll::Ready(Err(SendError(item))),
-                    SendState::QueuedItem(hook) => match hook.try_take() {
-                        Some(item) => Poll::Ready(Err(SendError(item))),
-                        None => Poll::Ready(Ok(())),
-                    },
+                let item = hook.try_take();
+                self.hook = None;
+                match item {
+                    Some(item) => Poll::Ready(Err(SendError(item))),
+                    None => Poll::Ready(Ok(())),
                 }
             } else {
                 hook.update_waker(cx.waker());
                 Poll::Pending
             }
-        } else if let Some(SendState::NotYetSent(_)) = self.hook {
-            let mut mut_self = self.project();
-            let (shared, this_hook) = (&mut_self.sender.shared, &mut mut_self.hook);
+        } else if let Some(SendState::NotYetSent(item)) = self.hook.take() {
+            let this = self.get_mut();
+            let (shared, this_hook) = (&this.sender.shared, &mut this.hook);
 
             shared.send(
                 // item
-                match this_hook.take().unwrap() {
-                    SendState::NotYetSent(item) => item,
-                    SendState::QueuedItem(_) => return Poll::Ready(Ok(())),
-                },
+                item,
                 // should_block
                 true,
                 // make_signal
                 |msg| Hook::slot(Some(msg), AsyncSignal::new(cx, false)),
                 // do_block
                 |hook| {
-                    **this_hook = Some(SendState::QueuedItem(hook));
+                    *this_hook = Some(SendState::QueuedItem(hook));
                     Poll::Pending
                 },
             )
