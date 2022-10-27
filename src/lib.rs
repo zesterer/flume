@@ -648,6 +648,14 @@ impl<T> Shared<T> {
     fn capacity(&self) -> Option<usize> {
         wait_lock(&self.chan).sending.as_ref().map(|(cap, _)| *cap)
     }
+
+    fn sender_count(&self) -> usize {
+        self.sender_count.load(Ordering::Relaxed)
+    }
+
+    fn receiver_count(&self) -> usize {
+        self.receiver_count.load(Ordering::Relaxed)
+    }
 }
 
 /// A transmitting end of a channel.
@@ -723,6 +731,20 @@ impl<T> Sender<T> {
     /// If the channel is bounded, returns its capacity.
     pub fn capacity(&self) -> Option<usize> {
         self.shared.capacity()
+    }
+
+    /// Get the number of senders that currently exist, including this one.
+    pub fn sender_count(&self) -> usize {
+        self.shared.sender_count()
+    }
+
+    /// Get the number of receivers that currently exist.
+    ///
+    /// Note that this method makes no guarantees that a subsequent send will succeed; it's
+    /// possible that between `receiver_count()` being called and a `send()`, all open receivers
+    /// could drop.
+    pub fn receiver_count(&self) -> usize {
+        self.shared.receiver_count()
     }
 
     /// Creates a [`WeakSender`] that does not keep the channel open.
@@ -894,6 +916,16 @@ impl<T> Receiver<T> {
     /// If the channel is bounded, returns its capacity.
     pub fn capacity(&self) -> Option<usize> {
         self.shared.capacity()
+    }
+
+    /// Get the number of senders that currently exist.
+    pub fn sender_count(&self) -> usize {
+        self.shared.sender_count()
+    }
+
+    /// Get the number of receivers that currently exist, including this one.
+    pub fn receiver_count(&self) -> usize {
+        self.shared.receiver_count()
     }
 }
 
