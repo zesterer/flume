@@ -5,6 +5,7 @@ authors = ["Joshua Barretto <joshua.s.barretto@gmail.com>"]
 edition = "2018"
 description = "A blazingly fast multi-producer channel"
 repository = "https://github.com/zesterer/flume"
+documentation = "https://docs.rs/flume"
 keywords = ["mpsc", "fifo", "channel", "thread", "mpmc"]
 categories = ["concurrency", "data-structures"]
 license = "Apache-2.0/MIT"
