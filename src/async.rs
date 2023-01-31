@@ -94,7 +94,7 @@ impl<T> Sender<T> {
     ///
     /// In the current implementation, the returned future will not yield to the async runtime if the
     /// channel is unbounded. This may change in later versions.
-    pub fn into_send_async(self, item: T) -> SendFut<'static, T> {
+    pub fn into_send_async<'a>(self, item: T) -> SendFut<'a, T> {
         SendFut {
             sender: OwnedOrRef::Owned(self),
             hook: Some(SendState::NotYetSent(item)),
@@ -117,7 +117,7 @@ impl<T> Sender<T> {
     ///
     /// In the current implementation, the returned sink will not yield to the async runtime if the
     /// channel is unbounded. This may change in later versions.
-    pub fn into_sink(self) -> SendSink<'static, T> {
+    pub fn into_sink<'a>(self) -> SendSink<'a, T> {
         SendSink(SendFut {
             sender: OwnedOrRef::Owned(self),
             hook: None,
@@ -318,7 +318,7 @@ impl<T> Receiver<T> {
     /// Convert this receiver into a future that asynchronously receives a single message from the
     /// channel, returning an error if all senders have been dropped. If the channel is empty, this
     /// future will yield to the async runtime.
-    pub fn into_recv_async(self) -> RecvFut<'static, T> {
+    pub fn into_recv_async<'a>(self) -> RecvFut<'a, T> {
         RecvFut::new(OwnedOrRef::Owned(self))
     }
 
@@ -329,7 +329,7 @@ impl<T> Receiver<T> {
     }
 
     /// Convert this receiver into a stream that allows asynchronously receiving messages from the channel.
-    pub fn into_stream(self) -> RecvStream<'static, T> {
+    pub fn into_stream<'a>(self) -> RecvStream<'a, T> {
         RecvStream(RecvFut::new(OwnedOrRef::Owned(self)))
     }
 }
