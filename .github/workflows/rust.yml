@@ -36,7 +36,7 @@ jobs:
             channel: stable
             target: x86_64-pc-windows-msvc
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - run: |
         TOOLCHAIN=${{ matrix.channel }}-${{ matrix.target }}
         rustup toolchain install --no-self-update $TOOLCHAIN
