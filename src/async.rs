@@ -374,29 +374,36 @@ impl<'a, T> RecvFut<'a, T> {
         stream: bool,
     ) -> Poll<Result<T, RecvError>> {
         if self.hook.is_some() {
-            if let Ok(msg) = self.receiver.shared.recv_sync(None) {
-                Poll::Ready(Ok(msg))
-            } else if self.receiver.shared.is_disconnected() {
-                Poll::Ready(Err(RecvError::Disconnected))
-            } else {
-                let hook = self.hook.as_ref().map(Arc::clone).unwrap();
-                if hook.update_waker(cx.waker()) {
-                    // If the previous hook was awakened, we need to insert it back to the
-                    // queue, otherwise, it remains valid.
-                    wait_lock(&self.receiver.shared.chan).waiting.push_back(hook);
+            match self.receiver.shared.recv_sync(None) {
+                Ok(msg) => return Poll::Ready(Ok(msg)),
+                Err(TryRecvTimeoutError::Disconnected) => {
+                    return Poll::Ready(Err(RecvError::Disconnected))
                 }
-                // To avoid a missed wakeup, re-check disconnect status here because the channel might have
-                // gotten shut down before we had a chance to push our hook
-                if self.receiver.shared.is_disconnected() {
-                    // And now, to avoid a race condition between the first recv attempt and the disconnect check we
-                    // just performed, attempt to recv again just in case we missed something.
-                    Poll::Ready(self.receiver.shared
+                _ => (),
+            }
+
+            let hook = self.hook.as_ref().map(Arc::clone).unwrap();
+            if hook.update_waker(cx.waker()) {
+                // If the previous hook was awakened, we need to insert it back to the
+                // queue, otherwise, it remains valid.
+                wait_lock(&self.receiver.shared.chan)
+                    .waiting
+                    .push_back(hook);
+            }
+            // To avoid a missed wakeup, re-check disconnect status here because the channel might have
+            // gotten shut down before we had a chance to push our hook
+            if self.receiver.shared.is_disconnected() {
+                // And now, to avoid a race condition between the first recv attempt and the disconnect check we
+                // just performed, attempt to recv again just in case we missed something.
+                Poll::Ready(
+                    self.receiver
+                        .shared
                         .recv_sync(None)
                         .map(Ok)
-                        .unwrap_or(Err(RecvError::Disconnected)))
-                } else {
-                    Poll::Pending
-                }
+                        .unwrap_or(Err(RecvError::Disconnected)),
+                )
+            } else {
+                Poll::Pending
             }
         } else {
             let mut_self = self.get_mut();
