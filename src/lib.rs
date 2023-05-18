@@ -756,6 +756,11 @@ impl<T> Sender<T> {
             shared: Arc::downgrade(&self.shared),
         }
     }
+
+    /// Returns whether the senders are belong to the same channel.
+    pub fn same_channel(&self, other: &Sender<T>) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
 }
 
 impl<T> Clone for Sender<T> {
@@ -926,6 +931,11 @@ impl<T> Receiver<T> {
     /// Get the number of receivers that currently exist, including this one.
     pub fn receiver_count(&self) -> usize {
         self.shared.receiver_count()
+    }
+
+    /// Returns whether the receivers are belong to the same channel.
+    pub fn same_channel(&self, other: &Receiver<T>) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
     }
 }
 
