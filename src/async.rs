@@ -274,6 +274,11 @@ impl<'a, T> SendSink<'a, T> {
     pub fn capacity(&self) -> Option<usize> {
         self.0.capacity()
     }
+
+    /// Returns whether the SendSinks are belong to the same channel.
+    pub fn same_channel(&self, other: &Self) -> bool {
+        self.sender().same_channel(other.sender())
+    }
 }
 
 impl<'a, T> Sink<T> for SendSink<'a, T> {
@@ -502,6 +507,11 @@ impl<'a, T> RecvStream<'a, T> {
     /// See [`Receiver::capacity`].
     pub fn capacity(&self) -> Option<usize> {
         self.0.capacity()
+    }
+
+    /// Returns whether the SendSinks are belong to the same channel.
+    pub fn same_channel(&self, other: &Self) -> bool {
+        self.0.receiver.same_channel(&*other.0.receiver)
     }
 }
 
