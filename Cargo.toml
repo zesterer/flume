@@ -20,7 +20,7 @@ exclude = [
 spin = []
 select = []
 async = ["futures-sink", "futures-core"]
-eventual-fairness = ["async", "nanorand"]
+eventual-fairness = ["select", "nanorand"]
 default = ["async", "select", "eventual-fairness"]
 
 [dependencies]
