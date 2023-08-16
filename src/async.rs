@@ -10,6 +10,7 @@ use std::{
 use crate::*;
 use futures_core::{stream::{Stream, FusedStream}, future::FusedFuture};
 use futures_sink::Sink;
+use spin1::Mutex as Spinlock;
 
 struct AsyncSignal {
     waker: Spinlock<Waker>,

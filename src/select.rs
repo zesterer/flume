@@ -1,6 +1,7 @@
 //! Types that permit waiting upon multiple blocking operations using the [`Selector`] interface.
 
 use crate::*;
+use spin1::Mutex as Spinlock;
 use std::{any::Any, marker::PhantomData};
 
 #[cfg(feature = "eventual-fairness")]
