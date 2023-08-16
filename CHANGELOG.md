@@ -15,6 +15,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+# [0.11.0] - 2023-08-16
+
+### Added
+
+- `WeakSender`, a sender that doesn't keep the channel open
+- `Sender/Receiver::sender_count/receiver_count`, a way to query the number of senders and receivers attached to a channel
+- `Sender/Receiver::same_channel`, a way to determine whether senders and receivers are attached to the same channel
+
+### Changed
+
+- Relaxed some API features
+- Make all remaining spinlocks opt-in
+
+### Fixed
+
+- Fixed a rare race condition in the async implementation
+
 # [0.10.14] - 2022-07-21
 
 ### Fixed
