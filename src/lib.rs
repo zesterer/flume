@@ -47,6 +47,7 @@ use std::{
     fmt,
 };
 
+#[cfg(feature = "spin")]
 use spin1::{Mutex as Spinlock, MutexGuard as SpinlockGuard};
 use crate::signal::{Signal, SyncSignal};
 
@@ -256,14 +257,69 @@ enum TryRecvTimeoutError {
 }
 
 // TODO: Investigate some sort of invalidation flag for timeouts
+#[cfg(feature = "spin")]
 struct Hook<T, S: ?Sized>(Option<Spinlock<Option<T>>>, S);
 
+#[cfg(not(feature = "spin"))]
+struct Hook<T, S: ?Sized>(Option<Mutex<Option<T>>>, S);
+
+#[cfg(feature = "spin")]
 impl<T, S: ?Sized + Signal> Hook<T, S> {
-    pub fn slot(msg: Option<T>, signal: S) -> Arc<Self> where S: Sized {
+    pub fn slot(msg: Option<T>, signal: S) -> Arc<Self>
+    where
+        S: Sized,
+    {
         Arc::new(Self(Some(Spinlock::new(msg)), signal))
     }
 
-    pub fn trigger(signal: S) -> Arc<Self> where S: Sized {
+    fn lock(&self) -> Option<SpinlockGuard<'_, Option<T>>> {
+        self.0.as_ref().map(|s| s.lock())
+    }
+}
+
+#[cfg(not(feature = "spin"))]
+impl<T, S: ?Sized + Signal> Hook<T, S> {
+    pub fn slot(msg: Option<T>, signal: S) -> Arc<Self>
+    where
+        S: Sized,
+    {
+        Arc::new(Self(Some(Mutex::new(msg)), signal))
+    }
+
+    fn lock(&self) -> Option<MutexGuard<'_, Option<T>>> {
+        self.0.as_ref().map(|s| s.lock().unwrap())
+    }
+}
+
+impl<T, S: ?Sized + Signal> Hook<T, S> {
+    pub fn fire_recv(&self) -> (T, &S) {
+        let msg = self.lock().unwrap().take().unwrap();
+        (msg, self.signal())
+    }
+
+    pub fn fire_send(&self, msg: T) -> (Option<T>, &S) {
+        let ret = match self.lock() {
+            Some(mut lock) => {
+                *lock = Some(msg);
+                None
+            }
+            None => Some(msg),
+        };
+        (ret, self.signal())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lock().map(|s| s.is_none()).unwrap_or(true)
+    }
+
+    pub fn try_take(&self) -> Option<T> {
+        self.lock().unwrap().take()
+    }
+
+    pub fn trigger(signal: S) -> Arc<Self>
+    where
+        S: Sized,
+    {
         Arc::new(Self(None, signal))
     }
 
@@ -274,37 +330,13 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
     pub fn fire_nothing(&self) -> bool {
         self.signal().fire()
     }
-
-    pub fn fire_recv(&self) -> (T, &S) {
-        let msg = self.0.as_ref().unwrap().lock().take().unwrap();
-        (msg, self.signal())
-    }
-
-    pub fn fire_send(&self, msg: T) -> (Option<T>, &S) {
-        let ret = match &self.0 {
-            Some(hook) => {
-                *hook.lock() = Some(msg);
-                None
-            },
-            None => Some(msg),
-        };
-        (ret, self.signal())
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.as_ref().map(|s| s.lock().is_none()).unwrap_or(true)
-    }
-
-    pub fn try_take(&self) -> Option<T> {
-        self.0.as_ref().and_then(|s| s.lock().take())
-    }
 }
 
 impl<T> Hook<T, SyncSignal> {
     pub fn wait_recv(&self, abort: &AtomicBool) -> Option<T> {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
-            let msg = self.0.as_ref().unwrap().lock().take();
+            let msg = self.lock().unwrap().take();
             if let Some(msg) = msg {
                 break Some(msg);
             } else if disconnected {
@@ -319,7 +351,7 @@ impl<T> Hook<T, SyncSignal> {
     pub fn wait_deadline_recv(&self, abort: &AtomicBool, deadline: Instant) -> Result<T, bool> {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
-            let msg = self.0.as_ref().unwrap().lock().take();
+            let msg = self.lock().unwrap().take();
             if let Some(msg) = msg {
                 break Ok(msg);
             } else if disconnected {
@@ -335,7 +367,7 @@ impl<T> Hook<T, SyncSignal> {
     pub fn wait_send(&self, abort: &AtomicBool) {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
-            if disconnected || self.0.as_ref().unwrap().lock().is_none() {
+            if disconnected || self.lock().unwrap().is_none() {
                 break;
             }
 
@@ -347,7 +379,7 @@ impl<T> Hook<T, SyncSignal> {
     pub fn wait_deadline_send(&self, abort: &AtomicBool, deadline: Instant) -> Result<(), bool> {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
-            if self.0.as_ref().unwrap().lock().is_none() {
+            if self.lock().unwrap().is_none() {
                 break Ok(());
             } else if disconnected {
                 break Err(false);
