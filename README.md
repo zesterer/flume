@@ -46,8 +46,26 @@ fn main() {
 
 To use Flume, place the following line under the `[dependencies]` section in your `Cargo.toml`:
 
-```
+```toml
 flume = "x.y"
+```
+
+## Cargo Features
+
+Flume comes with several optional features:
+
+- `spin`: use spinlocks instead of OS-level synchronisation primitives internally for some kind of data access (may be more performant on a small number of platforms for specific workloads)
+
+- `select`: Adds support for the [`Selector`](https://docs.rs/flume/latest/flume/select/struct.Selector.html) API, allowing a thread to wait on several channels/operations at once
+
+- `async`: Adds support for the [async API](https://docs.rs/flume/latest/flume/async/index.html), including on otherwise synchronous channels
+
+- `eventual-fairness`: Use randomness in the implementation of `Selector` to avoid biasing/saturating certain events over others
+
+You can enable these features by changing the dependency in your `Cargo.toml` like so:
+
+```toml
+flume = { version = "x.y", default-features = false, features = ["async", "select"] }
 ```
 
 ## [Benchmarks](https://what-if.xkcd.com/147/)
