@@ -858,6 +858,13 @@ impl<T> WeakSender<T> {
     }
 }
 
+impl<T> Clone for WeakSender<T> {
+    /// Clones this [`WeakSender`].
+    fn clone(&self) -> Self {
+        Self { shared: self.shared.clone() }
+    }
+}
+
 /// The receiving end of a channel.
 ///
 /// Note: Cloning the receiver *does not* turn this channel into a broadcast channel.
