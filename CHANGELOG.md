@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `spin-plain` feature that switches the locking implementation to a plain spinlock without `std::thread::sleep`
+
 ### Removed
 
 ### Changed
