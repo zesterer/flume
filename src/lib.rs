@@ -47,7 +47,7 @@ use std::{
     fmt,
 };
 
-#[cfg(feature = "spin")]
+#[cfg(any(feature = "spin", feature = "spin-plain"))]
 use spin1::{Mutex as Spinlock, MutexGuard as SpinlockGuard};
 use crate::signal::{Signal, SyncSignal};
 
@@ -257,13 +257,13 @@ enum TryRecvTimeoutError {
 }
 
 // TODO: Investigate some sort of invalidation flag for timeouts
-#[cfg(feature = "spin")]
+#[cfg(any(feature = "spin", feature = "spin-plain"))]
 struct Hook<T, S: ?Sized>(Option<Spinlock<Option<T>>>, S);
 
-#[cfg(not(feature = "spin"))]
+#[cfg(not(any(feature = "spin", feature = "spin-plain")))]
 struct Hook<T, S: ?Sized>(Option<Mutex<Option<T>>>, S);
 
-#[cfg(feature = "spin")]
+#[cfg(any(feature = "spin", feature = "spin-plain"))]
 impl<T, S: ?Sized + Signal> Hook<T, S> {
     pub fn slot(msg: Option<T>, signal: S) -> Arc<Self>
     where
@@ -277,7 +277,7 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
     }
 }
 
-#[cfg(not(feature = "spin"))]
+#[cfg(not(any(feature = "spin", feature = "spin-plain")))]
 impl<T, S: ?Sized + Signal> Hook<T, S> {
     pub fn slot(msg: Option<T>, signal: S) -> Arc<Self>
     where
@@ -392,7 +392,7 @@ impl<T> Hook<T, SyncSignal> {
     }
 }
 
-#[cfg(feature = "spin")]
+#[cfg(all(feature = "spin", not(feature = "spin-plain")))]
 #[inline]
 fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
     let mut i = 4;
@@ -409,18 +409,24 @@ fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
     }
 }
 
-#[cfg(not(feature = "spin"))]
+#[cfg(feature = "spin-plain")]
+#[inline]
+fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
+    lock.lock()
+}
+
+#[cfg(not(any(feature = "spin", feature = "spin-plain")))]
 #[inline]
 fn wait_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
     lock.lock().unwrap()
 }
 
-#[cfg(not(feature = "spin"))]
+#[cfg(not(any(feature = "spin", feature = "spin-plain")))]
 use std::sync::{Mutex, MutexGuard};
 
-#[cfg(feature = "spin")]
+#[cfg(any(feature = "spin", feature = "spin-plain"))]
 type ChanLock<T> = Spinlock<T>;
-#[cfg(not(feature = "spin"))]
+#[cfg(not(any(feature = "spin", feature = "spin-plain")))]
 type ChanLock<T> = Mutex<T>;
 
 
