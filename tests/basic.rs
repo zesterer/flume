@@ -1,18 +1,24 @@
-use std::time::{Instant, Duration};
 use flume::*;
+use std::time::{Duration, Instant};
 
 #[test]
 fn send_recv() {
     let (tx, rx) = unbounded();
-    for i in 0..1000 { tx.send(i).unwrap(); }
-    for i in 0..1000 { assert_eq!(rx.try_recv().unwrap(), i); }
+    for i in 0..1000 {
+        tx.send(i).unwrap();
+    }
+    for i in 0..1000 {
+        assert_eq!(rx.try_recv().unwrap(), i);
+    }
     assert!(rx.try_recv().is_err());
 }
 
 #[test]
 fn iter() {
     let (tx, rx) = unbounded();
-    for i in 0..1000 { tx.send(i).unwrap(); }
+    for i in 0..1000 {
+        tx.send(i).unwrap();
+    }
     drop(tx);
     assert_eq!(rx.iter().sum::<u32>(), (0..1000).sum());
 }
@@ -20,7 +26,9 @@ fn iter() {
 #[test]
 fn try_iter() {
     let (tx, rx) = unbounded();
-    for i in 0..1000 { tx.send(i).unwrap(); }
+    for i in 0..1000 {
+        tx.send(i).unwrap();
+    }
     assert_eq!(rx.try_iter().sum::<u32>(), (0..1000).sum());
 }
 
@@ -154,7 +162,10 @@ fn drain() {
 
     rx.recv().unwrap();
 
-    (1u32..100).chain(0..100).zip(rx).for_each(|(l, r)| assert_eq!(l, r));
+    (1u32..100)
+        .chain(0..100)
+        .zip(rx)
+        .for_each(|(l, r)| assert_eq!(l, r));
 }
 
 #[test]
@@ -227,7 +238,11 @@ fn rendezvous() {
             tx.send(()).unwrap();
             let now = Instant::now();
 
-            assert!(now.duration_since(then) > Duration::from_millis(100), "iter = {}", i);
+            assert!(
+                now.duration_since(then) > Duration::from_millis(100),
+                "iter = {}",
+                i
+            );
         });
 
         std::thread::sleep(Duration::from_millis(1000));
@@ -343,13 +358,9 @@ fn select_general() {
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(rx0.recv().unwrap(), Foo(42));
         assert_eq!(rx0.recv().unwrap(), Foo(43));
-
     });
 
-    Selector::new()
-        .send(&tx0, Foo(43), |x| x)
-        .wait()
-        .unwrap();
+    Selector::new().send(&tx0, Foo(43), |x| x).wait().unwrap();
 
     t.join().unwrap();
 }

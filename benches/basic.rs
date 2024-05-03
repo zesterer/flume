@@ -1,18 +1,14 @@
 #[macro_use]
 extern crate criterion;
 
-use std::{
-    sync::mpsc,
-    thread,
-    fmt::Debug,
-};
-use criterion::{Criterion, Bencher, black_box};
+use criterion::{black_box, Bencher, Criterion};
 use std::time::Instant;
+use std::{fmt::Debug, sync::mpsc, thread};
 
 trait Sender: Clone + Send + Sized + 'static {
     type Item: Debug + Default;
-    type BoundedSender: Sender<Item=Self::Item>;
-    type Receiver: Receiver<Item=Self::Item>;
+    type BoundedSender: Sender<Item = Self::Item>;
+    type Receiver: Receiver<Item = Self::Item>;
 
     fn unbounded() -> (Self, Self::Receiver);
     fn bounded(n: usize) -> (Self::BoundedSender, Self::Receiver);
@@ -22,7 +18,7 @@ trait Sender: Clone + Send + Sized + 'static {
 trait Receiver: Send + Sized + 'static {
     type Item: Default;
     fn recv(&self) -> Self::Item;
-    fn iter(&self) -> Box<dyn Iterator<Item=Self::Item> + '_>;
+    fn iter(&self) -> Box<dyn Iterator<Item = Self::Item> + '_>;
 }
 
 impl<T: Send + Debug + Default + 'static> Sender for flume::Sender<T> {
@@ -50,7 +46,7 @@ impl<T: Send + Default + 'static> Receiver for flume::Receiver<T> {
         flume::Receiver::recv(self).unwrap()
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item=T> + '_> {
+    fn iter(&self) -> Box<dyn Iterator<Item = T> + '_> {
         Box::new(std::iter::from_fn(move || flume::Receiver::recv(self).ok()))
     }
 }
@@ -80,7 +76,7 @@ impl<T: Send + Default + 'static> Receiver for crossbeam_channel::Receiver<T> {
         crossbeam_channel::Receiver::recv(self).unwrap()
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item=T> + '_> {
+    fn iter(&self) -> Box<dyn Iterator<Item = T> + '_> {
         Box::new(crossbeam_channel::Receiver::iter(self))
     }
 }
@@ -108,8 +104,12 @@ impl<T: Send + Debug + Default + 'static> Sender for mpsc::SyncSender<T> {
     type BoundedSender = Self;
     type Receiver = mpsc::Receiver<T>;
 
-    fn unbounded() -> (Self, Self::Receiver) { unimplemented!() }
-    fn bounded(_: usize) -> (Self::BoundedSender, Self::Receiver) { unimplemented!() }
+    fn unbounded() -> (Self, Self::Receiver) {
+        unimplemented!()
+    }
+    fn bounded(_: usize) -> (Self::BoundedSender, Self::Receiver) {
+        unimplemented!()
+    }
 
     fn send(&self, msg: T) {
         mpsc::SyncSender::send(self, msg).unwrap();
@@ -123,7 +123,7 @@ impl<T: Send + Default + 'static> Receiver for mpsc::Receiver<T> {
         mpsc::Receiver::recv(self).unwrap()
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item=T> + '_> {
+    fn iter(&self) -> Box<dyn Iterator<Item = T> + '_> {
         Box::new(mpsc::Receiver::iter(self))
     }
 }
@@ -182,7 +182,8 @@ fn test_hydra<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize) {
 }
 
 fn test_kitsune<S: Sender>(b: &mut Bencher, thread_num: usize, msg_num: usize)
-    where S::Receiver: Clone
+where
+    S::Receiver: Clone,
 {
     let (out_tx, out_rx) = S::unbounded();
     let (in_tx, in_rx) = S::unbounded();
@@ -290,7 +291,7 @@ fn test_mpsc_bounded_no_wait<S: Sender>(b: &mut Bencher, thread_num: u64) {
                 black_box(rx.recv());
             }
         })
-            .unwrap();
+        .unwrap();
 
         start.elapsed()
     })
@@ -315,7 +316,7 @@ fn test_mpsc_bounded<S: Sender>(b: &mut Bencher, bound: usize, thread_num: usize
 
             scope.spawn(move |_| {
                 // Remainder
-                for _ in 0..msgs - (msgs / thread_num as usize * thread_num)  {
+                for _ in 0..msgs - (msgs / thread_num as usize * thread_num) {
                     tx.send(Default::default());
                 }
             });
@@ -324,7 +325,7 @@ fn test_mpsc_bounded<S: Sender>(b: &mut Bencher, bound: usize, thread_num: usize
                 black_box(rx.recv());
             }
         })
-            .unwrap();
+        .unwrap();
 
         start.elapsed()
     })
@@ -332,110 +333,196 @@ fn test_mpsc_bounded<S: Sender>(b: &mut Bencher, bound: usize, thread_num: usize
 
 fn create(b: &mut Criterion) {
     b.bench_function("create-flume", |b| test_create::<flume::Sender<u32>>(b));
-    b.bench_function("create-crossbeam", |b| test_create::<crossbeam_channel::Sender<u32>>(b));
+    b.bench_function("create-crossbeam", |b| {
+        test_create::<crossbeam_channel::Sender<u32>>(b)
+    });
     b.bench_function("create-std", |b| test_create::<mpsc::Sender<u32>>(b));
 }
 
 fn oneshot(b: &mut Criterion) {
     b.bench_function("oneshot-flume", |b| test_oneshot::<flume::Sender<u32>>(b));
-    b.bench_function("oneshot-crossbeam", |b| test_oneshot::<crossbeam_channel::Sender<u32>>(b));
+    b.bench_function("oneshot-crossbeam", |b| {
+        test_oneshot::<crossbeam_channel::Sender<u32>>(b)
+    });
     b.bench_function("oneshot-std", |b| test_oneshot::<mpsc::Sender<u32>>(b));
 }
 
 fn inout(b: &mut Criterion) {
     b.bench_function("inout-flume", |b| test_inout::<flume::Sender<u32>>(b));
-    b.bench_function("inout-crossbeam", |b| test_inout::<crossbeam_channel::Sender<u32>>(b));
+    b.bench_function("inout-crossbeam", |b| {
+        test_inout::<crossbeam_channel::Sender<u32>>(b)
+    });
     b.bench_function("inout-std", |b| test_inout::<mpsc::Sender<u32>>(b));
 }
 
 fn hydra_32t_1m(b: &mut Criterion) {
-    b.bench_function("hydra-32t-1m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 32, 1));
-    b.bench_function("hydra-32t-1m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 32, 1));
-    b.bench_function("hydra-32t-1m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 32, 1));
+    b.bench_function("hydra-32t-1m-flume", |b| {
+        test_hydra::<flume::Sender<u32>>(b, 32, 1)
+    });
+    b.bench_function("hydra-32t-1m-crossbeam", |b| {
+        test_hydra::<crossbeam_channel::Sender<u32>>(b, 32, 1)
+    });
+    b.bench_function("hydra-32t-1m-std", |b| {
+        test_hydra::<mpsc::Sender<u32>>(b, 32, 1)
+    });
 }
 
 fn hydra_32t_1000m(b: &mut Criterion) {
-    b.bench_function("hydra-32t-1000m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 32, 1000));
-    b.bench_function("hydra-32t-1000m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 32, 1000));
-    b.bench_function("hydra-32t-1000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 32, 1000));
+    b.bench_function("hydra-32t-1000m-flume", |b| {
+        test_hydra::<flume::Sender<u32>>(b, 32, 1000)
+    });
+    b.bench_function("hydra-32t-1000m-crossbeam", |b| {
+        test_hydra::<crossbeam_channel::Sender<u32>>(b, 32, 1000)
+    });
+    b.bench_function("hydra-32t-1000m-std", |b| {
+        test_hydra::<mpsc::Sender<u32>>(b, 32, 1000)
+    });
 }
 
 fn hydra_256t_1m(b: &mut Criterion) {
-    b.bench_function("hydra-256t-1m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 256, 1));
-    b.bench_function("hydra-256t-1m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 256, 1));
-    b.bench_function("hydra-256t-1m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 256, 1));
+    b.bench_function("hydra-256t-1m-flume", |b| {
+        test_hydra::<flume::Sender<u32>>(b, 256, 1)
+    });
+    b.bench_function("hydra-256t-1m-crossbeam", |b| {
+        test_hydra::<crossbeam_channel::Sender<u32>>(b, 256, 1)
+    });
+    b.bench_function("hydra-256t-1m-std", |b| {
+        test_hydra::<mpsc::Sender<u32>>(b, 256, 1)
+    });
 }
 
 fn hydra_1t_1000m(b: &mut Criterion) {
-    b.bench_function("hydra-1t-1000m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 1, 1000));
-    b.bench_function("hydra-1t-1000m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 1, 1000));
-    b.bench_function("hydra-1t-1000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 1, 1000));
+    b.bench_function("hydra-1t-1000m-flume", |b| {
+        test_hydra::<flume::Sender<u32>>(b, 1, 1000)
+    });
+    b.bench_function("hydra-1t-1000m-crossbeam", |b| {
+        test_hydra::<crossbeam_channel::Sender<u32>>(b, 1, 1000)
+    });
+    b.bench_function("hydra-1t-1000m-std", |b| {
+        test_hydra::<mpsc::Sender<u32>>(b, 1, 1000)
+    });
 }
 
 fn hydra_4t_10000m(b: &mut Criterion) {
-    b.bench_function("hydra-4t-10000m-flume", |b| test_hydra::<flume::Sender<u32>>(b, 4, 10000));
-    b.bench_function("hydra-4t-10000m-crossbeam", |b| test_hydra::<crossbeam_channel::Sender<u32>>(b, 4, 10000));
-    b.bench_function("hydra-4t-10000m-std", |b| test_hydra::<mpsc::Sender<u32>>(b, 4, 10000));
+    b.bench_function("hydra-4t-10000m-flume", |b| {
+        test_hydra::<flume::Sender<u32>>(b, 4, 10000)
+    });
+    b.bench_function("hydra-4t-10000m-crossbeam", |b| {
+        test_hydra::<crossbeam_channel::Sender<u32>>(b, 4, 10000)
+    });
+    b.bench_function("hydra-4t-10000m-std", |b| {
+        test_hydra::<mpsc::Sender<u32>>(b, 4, 10000)
+    });
 }
 
 fn kitsune_32t_1m(b: &mut Criterion) {
-    b.bench_function("kitsune-32t-1m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 32, 1));
-    b.bench_function("kitsune-32t-1m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 32, 1));
+    b.bench_function("kitsune-32t-1m-flume", |b| {
+        test_kitsune::<flume::Sender<u32>>(b, 32, 1)
+    });
+    b.bench_function("kitsune-32t-1m-crossbeam", |b| {
+        test_kitsune::<crossbeam_channel::Sender<u32>>(b, 32, 1)
+    });
     //b.bench_function("kitsune-32t-1m-std", |b| test_kitsune::<mpsc::Sender<u32>>(b, 32, 1));
 }
 
 fn kitsune_32t_1000m(b: &mut Criterion) {
-    b.bench_function("kitsune-32t-1000m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 32, 1000));
-    b.bench_function("kitsune-32t-1000m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 32, 1000));
+    b.bench_function("kitsune-32t-1000m-flume", |b| {
+        test_kitsune::<flume::Sender<u32>>(b, 32, 1000)
+    });
+    b.bench_function("kitsune-32t-1000m-crossbeam", |b| {
+        test_kitsune::<crossbeam_channel::Sender<u32>>(b, 32, 1000)
+    });
     //b.bench_function("kitsune-32t-1000m-std", |b| test_kitsune::<mpsc::Sender<u32>>(b, 32, 1000));
 }
 
 fn kitsune_256t_1m(b: &mut Criterion) {
-    b.bench_function("kitsune-256t-1m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 256, 1));
-    b.bench_function("kitsune-256t-1m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 256, 1));
+    b.bench_function("kitsune-256t-1m-flume", |b| {
+        test_kitsune::<flume::Sender<u32>>(b, 256, 1)
+    });
+    b.bench_function("kitsune-256t-1m-crossbeam", |b| {
+        test_kitsune::<crossbeam_channel::Sender<u32>>(b, 256, 1)
+    });
     //b.bench_function("kitsune-256t-1m-std", |b| test_kitsune::<mpsc::Sender<u32>>(b, 256, 1));
 }
 
 fn kitsune_1t_1000m(b: &mut Criterion) {
-    b.bench_function("kitsune-1t-1000m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 1, 1000));
-    b.bench_function("kitsune-1t-1000m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 1, 1000));
+    b.bench_function("kitsune-1t-1000m-flume", |b| {
+        test_kitsune::<flume::Sender<u32>>(b, 1, 1000)
+    });
+    b.bench_function("kitsune-1t-1000m-crossbeam", |b| {
+        test_kitsune::<crossbeam_channel::Sender<u32>>(b, 1, 1000)
+    });
     //b.bench_function("kitsune-1t-1000m-std", |b| test_kitsune::<mpsc::Sender<u32>>(b, 1, 1000));
 }
 
 fn kitsune_4t_10000m(b: &mut Criterion) {
-    b.bench_function("kitsune-4t-10000m-flume", |b| test_kitsune::<flume::Sender<u32>>(b, 4, 10000));
-    b.bench_function("kitsune-4t-10000m-crossbeam", |b| test_kitsune::<crossbeam_channel::Sender<u32>>(b, 4, 10000));
+    b.bench_function("kitsune-4t-10000m-flume", |b| {
+        test_kitsune::<flume::Sender<u32>>(b, 4, 10000)
+    });
+    b.bench_function("kitsune-4t-10000m-crossbeam", |b| {
+        test_kitsune::<crossbeam_channel::Sender<u32>>(b, 4, 10000)
+    });
     //b.bench_function("kitsune-4t-10000m-std", |b| test_kitsune::<mpsc::Sender<u32>>(b, 4, 10000));
 }
 
 fn robin_u_32t_1m(b: &mut Criterion) {
-    b.bench_function("robin-u-32t-1m-flume", |b| test_robin_u::<flume::Sender<u32>>(b, 32, 1));
-    b.bench_function("robin-u-32t-1m-crossbeam", |b| test_robin_u::<crossbeam_channel::Sender<u32>>(b, 32, 1));
-    b.bench_function("robin-u-32t-1m-std", |b| test_robin_u::<mpsc::Sender<u32>>(b, 32, 1));
+    b.bench_function("robin-u-32t-1m-flume", |b| {
+        test_robin_u::<flume::Sender<u32>>(b, 32, 1)
+    });
+    b.bench_function("robin-u-32t-1m-crossbeam", |b| {
+        test_robin_u::<crossbeam_channel::Sender<u32>>(b, 32, 1)
+    });
+    b.bench_function("robin-u-32t-1m-std", |b| {
+        test_robin_u::<mpsc::Sender<u32>>(b, 32, 1)
+    });
 }
 
 fn robin_u_4t_1000m(b: &mut Criterion) {
-    b.bench_function("robin-u-4t-1000m-flume", |b| test_robin_u::<flume::Sender<u32>>(b, 4, 1000));
-    b.bench_function("robin-u-4t-1000m-crossbeam", |b| test_robin_u::<crossbeam_channel::Sender<u32>>(b, 4, 1000));
-    b.bench_function("robin-u-4t-1000m-std", |b| test_robin_u::<mpsc::Sender<u32>>(b, 4, 1000));
+    b.bench_function("robin-u-4t-1000m-flume", |b| {
+        test_robin_u::<flume::Sender<u32>>(b, 4, 1000)
+    });
+    b.bench_function("robin-u-4t-1000m-crossbeam", |b| {
+        test_robin_u::<crossbeam_channel::Sender<u32>>(b, 4, 1000)
+    });
+    b.bench_function("robin-u-4t-1000m-std", |b| {
+        test_robin_u::<mpsc::Sender<u32>>(b, 4, 1000)
+    });
 }
 
 fn robin_b_32t_16m(b: &mut Criterion) {
-    b.bench_function("robin-b-32t-16m-flume", |b| test_robin_b::<flume::Sender<u32>>(b, 32, 16));
-    b.bench_function("robin-b-32t-16m-crossbeam", |b| test_robin_b::<crossbeam_channel::Sender<u32>>(b, 32, 16));
-    b.bench_function("robin-b-32t-16m-std", |b| test_robin_b::<mpsc::Sender<u32>>(b, 32, 16));
+    b.bench_function("robin-b-32t-16m-flume", |b| {
+        test_robin_b::<flume::Sender<u32>>(b, 32, 16)
+    });
+    b.bench_function("robin-b-32t-16m-crossbeam", |b| {
+        test_robin_b::<crossbeam_channel::Sender<u32>>(b, 32, 16)
+    });
+    b.bench_function("robin-b-32t-16m-std", |b| {
+        test_robin_b::<mpsc::Sender<u32>>(b, 32, 16)
+    });
 }
 
 fn robin_b_4t_1000m(b: &mut Criterion) {
-    b.bench_function("robin-b-4t-1000m-flume", |b| test_robin_b::<flume::Sender<u32>>(b, 4, 1000));
-    b.bench_function("robin-b-4t-1000m-crossbeam", |b| test_robin_b::<crossbeam_channel::Sender<u32>>(b, 4, 1000));
-    b.bench_function("robin-b-4t-1000m-std", |b| test_robin_b::<mpsc::Sender<u32>>(b, 4, 1000));
+    b.bench_function("robin-b-4t-1000m-flume", |b| {
+        test_robin_b::<flume::Sender<u32>>(b, 4, 1000)
+    });
+    b.bench_function("robin-b-4t-1000m-crossbeam", |b| {
+        test_robin_b::<crossbeam_channel::Sender<u32>>(b, 4, 1000)
+    });
+    b.bench_function("robin-b-4t-1000m-std", |b| {
+        test_robin_b::<mpsc::Sender<u32>>(b, 4, 1000)
+    });
 }
 
 fn mpsc_bounded_no_wait_4t(b: &mut Criterion) {
-    b.bench_function("mpsc-bounded-no-wait-4t-flume", |b| test_mpsc_bounded_no_wait::<flume::Sender<u32>>(b, 4));
-    b.bench_function("mpsc-bounded-no-wait-4t-crossbeam", |b| test_mpsc_bounded_no_wait::<crossbeam_channel::Sender<u32>>(b, 4));
-    b.bench_function("mpsc-bounded-no-wait-4t-std", |b| test_mpsc_bounded_no_wait::<mpsc::Sender<u32>>(b, 4));
+    b.bench_function("mpsc-bounded-no-wait-4t-flume", |b| {
+        test_mpsc_bounded_no_wait::<flume::Sender<u32>>(b, 4)
+    });
+    b.bench_function("mpsc-bounded-no-wait-4t-crossbeam", |b| {
+        test_mpsc_bounded_no_wait::<crossbeam_channel::Sender<u32>>(b, 4)
+    });
+    b.bench_function("mpsc-bounded-no-wait-4t-std", |b| {
+        test_mpsc_bounded_no_wait::<mpsc::Sender<u32>>(b, 4)
+    });
 }
 
 fn mpsc_bounded_4t(b: &mut Criterion) {
@@ -443,9 +530,15 @@ fn mpsc_bounded_4t(b: &mut Criterion) {
         let text = format!("mpsc-bounded-small-4t-{}m-", bound);
         let bound = *bound;
 
-        b.bench_function(&format!("{}{}", text, "flume"), |b| test_mpsc_bounded::<flume::Sender<u32>>(b, bound, 4));
-        b.bench_function(&format!("{}{}", text, "crossbeam"), |b| test_mpsc_bounded::<crossbeam_channel::Sender<u32>>(b, bound, 4));
-        b.bench_function(&format!("{}{}", text, "std"), |b| test_mpsc_bounded::<mpsc::Sender<u32>>(b, bound, 4));
+        b.bench_function(&format!("{}{}", text, "flume"), |b| {
+            test_mpsc_bounded::<flume::Sender<u32>>(b, bound, 4)
+        });
+        b.bench_function(&format!("{}{}", text, "crossbeam"), |b| {
+            test_mpsc_bounded::<crossbeam_channel::Sender<u32>>(b, bound, 4)
+        });
+        b.bench_function(&format!("{}{}", text, "std"), |b| {
+            test_mpsc_bounded::<mpsc::Sender<u32>>(b, bound, 4)
+        });
     }
 }
 

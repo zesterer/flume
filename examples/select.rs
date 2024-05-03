@@ -8,8 +8,12 @@ fn main() {
     let (blue_tx, blue_rx) = flume::unbounded();
 
     // Spawn two threads that each send a message into their respective channel
-    std::thread::spawn(move || { let _ = red_tx.send("Red"); });
-    std::thread::spawn(move || { let _ = blue_tx.send("Blue"); });
+    std::thread::spawn(move || {
+        let _ = red_tx.send("Red");
+    });
+    std::thread::spawn(move || {
+        let _ = blue_tx.send("Blue");
+    });
 
     // Race them to see which one sends their message first
     let winner = Selector::new()
