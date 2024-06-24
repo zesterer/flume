@@ -595,7 +595,7 @@ impl<T> Shared<T> {
             Err(TryRecvTimeoutError::Disconnected).into()
         } else if should_block {
             let hook = make_signal();
-            chan.waiting.push_back(hook.clone());
+            chan.waiting.push_front(hook.clone());
             drop(chan);
 
             do_block(hook)
