@@ -9,13 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `spin-plain` feature that switches the locking implementation to a plain spinlock without `std::thread::sleep`
-
 ### Removed
 
 ### Changed
 
 - `WeakSender` is now `Clone`
+- `spin` feature no longer uses `std::thread::sleep` for locking except on Unix-like operating systems and Windows
 
 ### Fixed
 

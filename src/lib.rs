@@ -47,7 +47,7 @@ use std::{
     fmt,
 };
 
-#[cfg(any(feature = "spin", feature = "spin-plain"))]
+#[cfg(feature = "spin")]
 use spin1::{Mutex as Spinlock, MutexGuard as SpinlockGuard};
 use crate::signal::{Signal, SyncSignal};
 
@@ -257,13 +257,13 @@ enum TryRecvTimeoutError {
 }
 
 // TODO: Investigate some sort of invalidation flag for timeouts
-#[cfg(any(feature = "spin", feature = "spin-plain"))]
+#[cfg(feature = "spin")]
 struct Hook<T, S: ?Sized>(Option<Spinlock<Option<T>>>, S);
 
-#[cfg(not(any(feature = "spin", feature = "spin-plain")))]
+#[cfg(not(feature = "spin"))]
 struct Hook<T, S: ?Sized>(Option<Mutex<Option<T>>>, S);
 
-#[cfg(any(feature = "spin", feature = "spin-plain"))]
+#[cfg(feature = "spin")]
 impl<T, S: ?Sized + Signal> Hook<T, S> {
     pub fn slot(msg: Option<T>, signal: S) -> Arc<Self>
     where
@@ -277,7 +277,7 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
     }
 }
 
-#[cfg(not(any(feature = "spin", feature = "spin-plain")))]
+#[cfg(not(feature = "spin"))]
 impl<T, S: ?Sized + Signal> Hook<T, S> {
     pub fn slot(msg: Option<T>, signal: S) -> Arc<Self>
     where
@@ -392,41 +392,43 @@ impl<T> Hook<T, SyncSignal> {
     }
 }
 
-#[cfg(all(feature = "spin", not(feature = "spin-plain")))]
+#[cfg(feature = "spin")]
 #[inline]
 fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
-    let mut i = 4;
-    loop {
-        for _ in 0..10 {
-            if let Some(guard) = lock.try_lock() {
-                return guard;
+    // Some targets don't support `thread::sleep` (e.g. the `wasm32-unknown-unknown` target when
+    // running in the main thread of a web browser) so we only use it on targets where we know it
+    // will work
+    #[cfg(any(target_family = "unix", target_family = "windows"))]
+    {
+        let mut i = 4;
+        loop {
+            for _ in 0..10 {
+                if let Some(guard) = lock.try_lock() {
+                    return guard;
+                }
+                thread::yield_now();
             }
-            thread::yield_now();
+            // Sleep for at most ~1 ms
+            thread::sleep(Duration::from_nanos(1 << i.min(20)));
+            i += 1;
         }
-        // Sleep for at most ~1 ms
-        thread::sleep(Duration::from_nanos(1 << i.min(20)));
-        i += 1;
     }
-}
-
-#[cfg(feature = "spin-plain")]
-#[inline]
-fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
+    #[cfg(not(any(target_family = "unix", target_family = "windows")))]
     lock.lock()
 }
 
-#[cfg(not(any(feature = "spin", feature = "spin-plain")))]
+#[cfg(not(feature = "spin"))]
 #[inline]
 fn wait_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
     lock.lock().unwrap()
 }
 
-#[cfg(not(any(feature = "spin", feature = "spin-plain")))]
+#[cfg(not(feature = "spin"))]
 use std::sync::{Mutex, MutexGuard};
 
-#[cfg(any(feature = "spin", feature = "spin-plain"))]
+#[cfg(feature = "spin")]
 type ChanLock<T> = Spinlock<T>;
-#[cfg(not(any(feature = "spin", feature = "spin-plain")))]
+#[cfg(not(feature = "spin"))]
 type ChanLock<T> = Mutex<T>;
 
 

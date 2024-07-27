@@ -18,8 +18,6 @@ exclude = [
 [features]
 # Use a spinlock internally (may be faster on some platforms)
 spin = []
-# Use a spinlock internally without `std::thread::sleep` (for platforms that don't support blocking)
-spin-plain = []
 select = []
 async = ["futures-sink", "futures-core"]
 eventual-fairness = ["select", "nanorand"]
