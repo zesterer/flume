@@ -1,4 +1,4 @@
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 use {
     flume::*,
     futures::{stream::FuturesUnordered, StreamExt, TryFutureExt},
@@ -7,7 +7,7 @@ use {
 };
 use futures::{stream, Stream};
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn stream_recv() {
     let (tx, rx) = unbounded();
@@ -28,7 +28,7 @@ fn stream_recv() {
     t.join().unwrap();
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn stream_recv_disconnect() {
     let (tx, rx) = bounded::<i32>(0);
@@ -48,7 +48,7 @@ fn stream_recv_disconnect() {
     t.join().unwrap();
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn stream_recv_drop_recv() {
     let (tx, rx) = bounded::<i32>(10);
@@ -80,7 +80,7 @@ fn stream_recv_drop_recv() {
     assert_eq!(t.join().unwrap(), Some(42))
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn r#stream_drop_send_disconnect() {
     let (tx, rx) = bounded::<i32>(1);
@@ -98,7 +98,7 @@ fn r#stream_drop_send_disconnect() {
     t.join().unwrap();
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[async_std::test]
 async fn stream_send_1_million_no_drop_or_reorder() {
     #[derive(Debug)]
@@ -133,7 +133,7 @@ async fn stream_send_1_million_no_drop_or_reorder() {
     assert_eq!(count, 1_000_000)
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[async_std::test]
 async fn parallel_streams_and_async_recv() {
     let (tx, rx) = flume::unbounded();
@@ -174,7 +174,7 @@ async fn parallel_streams_and_async_recv() {
         .unwrap();
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn stream_no_double_wake() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -220,7 +220,7 @@ fn stream_no_double_wake() {
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[async_std::test]
 async fn stream_forward_issue_55() { // https://github.com/zesterer/flume/issues/55
     fn dummy_stream() -> impl Stream<Item = usize> {
