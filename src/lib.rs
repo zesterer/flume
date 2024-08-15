@@ -395,18 +395,26 @@ impl<T> Hook<T, SyncSignal> {
 #[cfg(feature = "spin")]
 #[inline]
 fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
-    let mut i = 4;
-    loop {
-        for _ in 0..10 {
-            if let Some(guard) = lock.try_lock() {
-                return guard;
+    // Some targets don't support `thread::sleep` (e.g. the `wasm32-unknown-unknown` target when
+    // running in the main thread of a web browser) so we only use it on targets where we know it
+    // will work
+    #[cfg(any(target_family = "unix", target_family = "windows"))]
+    {
+        let mut i = 4;
+        loop {
+            for _ in 0..10 {
+                if let Some(guard) = lock.try_lock() {
+                    return guard;
+                }
+                thread::yield_now();
             }
-            thread::yield_now();
+            // Sleep for at most ~1 ms
+            thread::sleep(Duration::from_nanos(1 << i.min(20)));
+            i += 1;
         }
-        // Sleep for at most ~1 ms
-        thread::sleep(Duration::from_nanos(1 << i.min(20)));
-        i += 1;
     }
+    #[cfg(not(any(target_family = "unix", target_family = "windows")))]
+    lock.lock()
 }
 
 #[cfg(not(feature = "spin"))]

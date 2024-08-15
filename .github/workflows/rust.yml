@@ -13,34 +13,45 @@ jobs:
       RUST_BACKTRACE: 1
     strategy:
       matrix:
-        build: [linux64, macos, win32, win64]
+        build: [linux64, macos, win32, win64, wasm32]
         include:
           - build: linux64
             os: ubuntu-latest
             channel: stable
+            toolchain: x86_64-unknown-linux-gnu
             target: x86_64-unknown-linux-gnu
           #- build: linux32
           #  os: ubuntu-latest
           #  channel: stable
+          #  toolchain: i686-unknown-linux-gnu
           #  target: i686-unknown-linux-gnu
           - build: macos
             os: macos-latest
             channel: stable
+            toolchain: x86_64-apple-darwin
             target: x86_64-apple-darwin
           - build: win32
             os: windows-latest
             channel: stable
+            toolchain: i686-pc-windows-msvc
             target: i686-pc-windows-msvc
           - build: win64
             os: windows-latest
             channel: stable
+            toolchain: x86_64-pc-windows-msvc
             target: x86_64-pc-windows-msvc
+          - build: wasm32
+            os: ubuntu-latest
+            channel: stable
+            toolchain: x86_64-unknown-linux-gnu
+            target: wasm32-unknown-unknown
     steps:
     - uses: actions/checkout@v2
     - run: |
-        TOOLCHAIN=${{ matrix.channel }}-${{ matrix.target }}
+        TOOLCHAIN=${{ matrix.channel }}-${{ matrix.toolchain }}
         rustup toolchain install --no-self-update $TOOLCHAIN
         rustup default $TOOLCHAIN
+        rustup target add ${{ matrix.target }}
       shell: bash
     - name: Rust version
       run: |
@@ -53,6 +64,7 @@ jobs:
     - run: cargo check --target ${{ matrix.target }}
     - run: cargo build --target ${{ matrix.target }}
     - run: cargo test --target ${{ matrix.target }}
+      if: ${{ matrix.target != 'wasm32-unknown-unknown' }}
     # FIXME(#41): Some timeout/deadline tests make more sense to run in release mode.
     #- run: cargo test --release --target ${{ matrix.target }}
     - run: cargo build --all-targets --target ${{ matrix.target }}
