@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `WeakSender` is now `Clone`
+- `spin` feature no longer uses `std::thread::sleep` for locking except on Unix-like operating systems and Windows
 
 ### Fixed
 

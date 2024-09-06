@@ -1,4 +1,4 @@
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 use {
     flume::*,
     futures::{stream::FuturesUnordered, StreamExt, TryFutureExt, Future},
@@ -7,7 +7,7 @@ use {
     std::{time::Duration, sync::{atomic::{AtomicUsize, Ordering}, Arc}},
 };
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn r#async_recv() {
     let (tx, rx) = unbounded();
@@ -24,7 +24,7 @@ fn r#async_recv() {
     t.join().unwrap();
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn r#async_send() {
     let (tx, rx) = bounded(1);
@@ -41,7 +41,7 @@ fn r#async_send() {
     t.join().unwrap();
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn r#async_recv_disconnect() {
     let (tx, rx) = bounded::<i32>(0);
@@ -58,7 +58,7 @@ fn r#async_recv_disconnect() {
     t.join().unwrap();
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn r#async_send_disconnect() {
     let (tx, rx) = bounded(0);
@@ -75,7 +75,7 @@ fn r#async_send_disconnect() {
     t.join().unwrap();
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn r#async_recv_drop_recv() {
     let (tx, rx) = bounded::<i32>(10);
@@ -103,7 +103,7 @@ fn r#async_recv_drop_recv() {
     assert_eq!(t.join().unwrap(), Ok(42))
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[async_std::test]
 async fn r#async_send_1_million_no_drop_or_reorder() {
     #[derive(Debug)]
@@ -137,7 +137,7 @@ async fn r#async_send_1_million_no_drop_or_reorder() {
     assert_eq!(count, 1_000_000)
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[async_std::test]
 async fn parallel_async_receivers() {
     let (tx, rx) = flume::unbounded();
@@ -175,7 +175,7 @@ async fn parallel_async_receivers() {
     println!("recv end");
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn change_waker() {
     let (tx, rx) = flume::bounded(1);
@@ -246,7 +246,7 @@ fn change_waker() {
     }
 }
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn spsc_single_threaded_value_ordering() {
     async fn test() {
