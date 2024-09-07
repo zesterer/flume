@@ -33,9 +33,9 @@ nanorand = { version = "0.7", features = ["getrandom"], optional = true }
 #flume-test = { path = "../flume-test" }
 crossbeam-channel = "0.5.5"
 crossbeam-utils = "0.8.10"
-criterion = "0.3.4"
+criterion = { version = "0.5.1", default-features = false }
 rand = "0.8.3"
-async-std = { version = "1.9.0", features = ["attributes", "unstable"] }
+async-std = { version = "1.13.0", features = ["attributes", "unstable"] }
 futures = { version = "^0.3", features = ["std"] }
 waker-fn = "1.1.0"
 tokio = { version = "^1.16.1", features = ["rt", "macros"] }
