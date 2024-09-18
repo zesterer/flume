@@ -7,6 +7,7 @@ use std::{
     any::Any,
     ops::Deref,
 };
+use std::fmt::{Debug, Formatter};
 use crate::*;
 use futures_core::{stream::{Stream, FusedStream}, future::FusedFuture};
 use futures_sink::Sink;
@@ -139,6 +140,12 @@ pub struct SendFut<'a, T> {
     sender: OwnedOrRef<'a, Sender<T>>,
     // Only none after dropping
     hook: Option<SendState<T>>,
+}
+
+impl<'a, T> Debug for SendFut<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendFut").finish()
+    }
 }
 
 impl<T> std::marker::Unpin for SendFut<'_, T> {}
@@ -279,6 +286,12 @@ impl<'a, T> SendSink<'a, T> {
     /// Returns whether the SendSinks are belong to the same channel.
     pub fn same_channel(&self, other: &Self) -> bool {
         self.sender().same_channel(other.sender())
+    }
+}
+
+impl<'a, T> Debug for SendSink<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendSink").finish()
     }
 }
 
@@ -459,6 +472,12 @@ impl<'a, T> RecvFut<'a, T> {
     }
 }
 
+impl<'a, T> Debug for RecvFut<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecvFut").finish()
+    }
+}
+
 impl<'a, T> Drop for RecvFut<'a, T> {
     fn drop(&mut self) {
         self.reset_hook();
@@ -513,6 +532,12 @@ impl<'a, T> RecvStream<'a, T> {
     /// Returns whether the SendSinks are belong to the same channel.
     pub fn same_channel(&self, other: &Self) -> bool {
         self.0.receiver.same_channel(&*other.0.receiver)
+    }
+}
+
+impl<'a, T> Debug for RecvStream<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecvStream").finish()
     }
 }
 

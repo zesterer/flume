@@ -46,7 +46,7 @@ use std::{
     thread,
     fmt,
 };
-
+use std::fmt::Formatter;
 #[cfg(feature = "spin")]
 use spin1::{Mutex as Spinlock, MutexGuard as SpinlockGuard};
 use crate::signal::{Signal, SyncSignal};
@@ -866,6 +866,12 @@ impl<T> WeakSender<T> {
     }
 }
 
+impl<T> fmt::Debug for WeakSender<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WeakSender").finish()
+    }
+}
+
 impl<T> Clone for WeakSender<T> {
     /// Clones this [`WeakSender`].
     fn clone(&self) -> Self {
@@ -1041,6 +1047,12 @@ pub struct Iter<'a, T> {
     receiver: &'a Receiver<T>,
 }
 
+impl<'a, T> fmt::Debug for Iter<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Iter").field("receiver", &self.receiver).finish()
+    }
+}
+
 impl<'a, T> Iterator for Iter<'a, T> {
     type Item = T;
 
@@ -1052,6 +1064,12 @@ impl<'a, T> Iterator for Iter<'a, T> {
 /// An non-blocking iterator over the msgs received from a channel.
 pub struct TryIter<'a, T> {
     receiver: &'a Receiver<T>,
+}
+
+impl<'a, T> fmt::Debug for TryIter<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TryIter").field("receiver", &self.receiver).finish()
+    }
 }
 
 impl<'a, T> Iterator for TryIter<'a, T> {
@@ -1089,6 +1107,12 @@ impl<'a, T> ExactSizeIterator for Drain<'a, T> {
 /// An owned iterator over the msgs received from a channel.
 pub struct IntoIter<T> {
     receiver: Receiver<T>,
+}
+
+impl<T> fmt::Debug for IntoIter<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IntoIter").field("receiver", &self.receiver).finish()
+    }
 }
 
 impl<T> Iterator for IntoIter<T> {
