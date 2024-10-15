@@ -15,6 +15,10 @@ exclude = [
     "/misc",
 ]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 # Use a spinlock internally (may be faster on some platforms)
 spin = []
