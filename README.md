@@ -78,6 +78,15 @@ Tests were performed on an AMD Ryzen 7 3700x with 8/16 cores running Linux kerne
 
 # <img src="misc/benchmarks.png" alt="Flume benchmarks (crossbeam benchmark suite)" width="100%"/>
 
+## Status
+
+Flume is in [casual maintenance mode](https://casuallymaintained.tech/). This means that the crate will continue to
+receive critical security and bug fixes, but heavy feature development has stopped. If you're looking for a new
+feature, you're welcome to open a PR and I'll try to find the time to review it.
+
+Flume has been great fun to work on, and I'm happy that it's being used successfully by so many people. I consider the
+crate to be largely feature-complete at this point (bar small details here and there).
+
 ## License
 
 Flume is licensed under either of:
