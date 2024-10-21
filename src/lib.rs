@@ -697,6 +697,15 @@ impl<T> Shared<T> {
     fn receiver_count(&self) -> usize {
         self.receiver_count.load(Ordering::Relaxed)
     }
+
+    fn shrink_to_fit(&self) {
+        let mut lock = wait_lock(&self.chan);
+        lock.queue.shrink_to_fit();
+    }
+
+    fn queue_capacity(&self) -> usize {
+        wait_lock(&self.chan).queue.capacity()
+    }
 }
 
 /// A transmitting end of a channel.
@@ -801,6 +810,16 @@ impl<T> Sender<T> {
     /// Returns whether the senders are belong to the same channel.
     pub fn same_channel(&self, other: &Sender<T>) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    /// Discards excess capacity in the internal queue.
+    pub fn shrink_to_fit(&self) {
+        self.shared.shrink_to_fit();
+    }
+
+    /// Returns the number of elements the internal queue can hold without reallocating.
+    pub fn queue_capacity(&self) -> usize {
+        self.shared.queue_capacity()
     }
 }
 
@@ -990,6 +1009,16 @@ impl<T> Receiver<T> {
     /// Returns whether the receivers are belong to the same channel.
     pub fn same_channel(&self, other: &Receiver<T>) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    /// Discards excess capacity in the internal queue.
+    pub fn shrink_to_fit(&self) {
+        self.shared.shrink_to_fit();
+    }
+
+    /// Returns the number of elements the internal queue can hold without reallocating.
+    pub fn queue_capacity(&self) -> usize {
+        self.shared.queue_capacity()
     }
 }
 
