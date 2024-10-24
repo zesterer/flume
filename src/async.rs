@@ -163,6 +163,14 @@ impl<'a, T> SendFut<'a, T> {
         }
     }
 
+    /// Consume `self` returning the queued value if it has not yet been sent.
+    pub fn into_inner(mut self) -> Option<T> {
+        self.hook.take().and_then(|state| match state {
+            SendState::NotYetSent(value) => Some(value),
+            SendState::QueuedItem(hook) => hook.try_take(),
+        })
+    }
+
     /// See [`Sender::is_disconnected`].
     pub fn is_disconnected(&self) -> bool {
         self.sender.is_disconnected()
