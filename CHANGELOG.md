@@ -13,8 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+### Fixed
+
+# [0.11.1] - 2024-10-19
+
+### Added
+
+- `SendSink::sender`
+- `SendFut`, `SendSink`, `RecvFut`, `RecvStream`, `WeakSender`, `Iter`, `TryIter`, and `IntoIter` now implement `Debug`
+- Docs now show required features
+
+### Removed
+
+### Changed
+
 - `WeakSender` is now `Clone`
 - `spin` feature no longer uses `std::thread::sleep` for locking except on Unix-like operating systems and Windows
+- Flume is now in [casual maintenance mode](https://casuallymaintained.tech/).
 
 ### Fixed
 
