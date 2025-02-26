@@ -24,14 +24,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 spin = []
 select = []
 async = ["futures-sink", "futures-core"]
-eventual-fairness = ["select", "nanorand"]
+eventual-fairness = ["select", "fastrand"]
 default = ["async", "select", "eventual-fairness"]
 
 [dependencies]
 spin1 = { package = "spin", version = "0.9.8", features = ["mutex"] }
 futures-sink = { version = "0.3", default_features = false, optional = true }
 futures-core = { version = "0.3", default_features = false, optional = true }
-nanorand = { version = "0.7", features = ["getrandom"], optional = true }
+fastrand = { version = "2.3", features = ["std", "js"], optional = true }
 
 [dev-dependencies]
 #flume-test = { path = "../flume-test" }
