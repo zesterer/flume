@@ -371,7 +371,7 @@ fn std_error_without_debug() {
     }
 
     match rx.recv() {
-        Ok(_) => {}
+        Ok(MessageWithoutDebug(n)) => assert_eq!(n, 1),
         Err(e) => {
             let _std_err: &dyn std::error::Error = &e;
         }
@@ -385,7 +385,7 @@ fn std_error_without_debug() {
     }
 
     match rx.try_recv() {
-        Ok(_) => {}
+        Ok(MessageWithoutDebug(n)) => assert_eq!(n, 2),
         Err(e) => {
             let _std_err: &dyn std::error::Error = &e;
         }
@@ -399,7 +399,7 @@ fn std_error_without_debug() {
     }
 
     match rx.recv_timeout(Duration::from_secs(10000000)) {
-        Ok(_) => {}
+        Ok(MessageWithoutDebug(n)) => assert_eq!(n, 3),
         Err(e) => {
             let _std_err: &dyn std::error::Error = &e;
         }
