@@ -4,9 +4,6 @@ use crate::*;
 use spin1::Mutex as Spinlock;
 use std::{any::Any, marker::PhantomData};
 
-#[cfg(feature = "eventual-fairness")]
-use nanorand::Rng;
-
 // A unique token corresponding to an event in a selector
 type Token = usize;
 
@@ -81,7 +78,7 @@ pub struct Selector<'a, T: 'a> {
     next_poll: usize,
     signalled: Arc<Spinlock<VecDeque<Token>>>,
     #[cfg(feature = "eventual-fairness")]
-    rng: nanorand::WyRand,
+    rng: fastrand::Rng,
     phantom: PhantomData<*const ()>,
 }
 
@@ -106,7 +103,7 @@ impl<'a, T> Selector<'a, T> {
             signalled: Arc::default(),
             phantom: PhantomData::default(),
             #[cfg(feature = "eventual-fairness")]
-            rng: nanorand::WyRand::new(),
+            rng: fastrand::Rng::new(),
         }
     }
 
@@ -320,7 +317,7 @@ impl<'a, T> Selector<'a, T> {
     fn wait_inner(mut self, deadline: Option<Instant>) -> Option<T> {
         #[cfg(feature = "eventual-fairness")]
         {
-            self.next_poll = self.rng.generate_range(0..self.selections.len());
+            self.next_poll = self.rng.usize(0..self.selections.len());
         }
 
         let res = 'outer: loop {
