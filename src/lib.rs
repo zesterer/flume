@@ -441,6 +441,14 @@ struct Chan<T> {
 }
 
 impl<T> Chan<T> {
+    fn shrink_to_fit(&mut self) {
+       self.queue.shrink_to_fit();
+       self.waiting.shrink_to_fit();
+       if let Some((_, ref mut v)) = self.sending {
+           v.shrink_to_fit();
+       }
+    }
+
     fn pull_pending(&mut self, pull_extra: bool) {
         if let Some((cap, sending)) = &mut self.sending {
             let effective_cap = *cap + pull_extra as usize;
@@ -699,8 +707,7 @@ impl<T> Shared<T> {
     }
 
     fn shrink_to_fit(&self) {
-        let mut lock = wait_lock(&self.chan);
-        lock.queue.shrink_to_fit();
+        wait_lock(&self.chan).shrink_to_fit();
     }
 
     fn queue_capacity(&self) -> usize {
