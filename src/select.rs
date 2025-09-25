@@ -389,7 +389,7 @@ impl<'a, T> Selector<'a, T> {
     /// `eventual-fairness` feature flag is enabled, this method is fair and will handle a random event of those that
     /// are ready.
     pub fn wait_timeout(self, dur: Duration) -> Result<T, SelectError> {
-        self.wait_inner(Some(Instant::now() + dur))
+        self.wait_inner(Instant::now().checked_add(dur))
             .ok_or(SelectError::Timeout)
     }
 
