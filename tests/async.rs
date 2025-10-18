@@ -274,3 +274,44 @@ fn spsc_single_threaded_value_ordering() {
     let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
     rt.block_on(test());
 }
+
+#[cfg(feature = "async")]
+#[async_std::test]
+async fn test_send_fut_into_inner() {
+    // check you can immediately get the value from the SendFut before awaiting
+    {
+        let (tx, _rx) = flume::bounded(1);
+        let fut = tx.send_async(0);
+        assert!(matches!(fut.into_inner(), Some(0)));
+    }
+
+    // check you can get the value after it's been polled in a timeout.
+    {
+        let (tx, _rx) = flume::bounded(1);
+        tx.send_async(1).await.unwrap();
+        let mut fut = tx.send_async(2);
+
+        assert!(
+            async_std::future::timeout(std::time::Duration::from_secs(0), &mut fut)
+                .await
+                .is_err()
+        );
+        assert!(matches!(fut.into_inner(), Some(2)));
+    }
+
+    // check you cannot get the value if it's been successfully sent.
+    {
+        let (tx, _rx) = flume::bounded(1);
+        let mut fut = tx.send_async(0);
+        assert!((&mut fut).await.is_ok());
+        assert!(fut.into_inner().is_none());
+    }
+
+    // check unbounded always consumes the value
+    {
+        let (tx, _rx) = flume::unbounded();
+        let mut fut = tx.send_async(0);
+        assert!((&mut fut).await.is_ok());
+        assert!(fut.into_inner().is_none());
+    }
+}
