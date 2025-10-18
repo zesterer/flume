@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use flume::{bounded, Receiver};
-use flume::{RecvError, RecvTimeoutError, TryRecvError};
+use flume::{RecvTimeoutError, TryRecvError};
 use flume::{SendError, SendTimeoutError, TrySendError};
 use crossbeam_utils::thread::scope;
 use rand::{thread_rng, Rng};

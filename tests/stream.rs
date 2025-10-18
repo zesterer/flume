@@ -34,7 +34,7 @@ fn stream_recv_disconnect() {
     let (tx, rx) = bounded::<i32>(0);
 
     let t = std::thread::spawn(move || {
-        tx.send(42);
+        tx.send(42).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(250));
         drop(tx)
     });
@@ -245,7 +245,10 @@ async fn stream_forward_issue_55() { // https://github.com/zesterer/flume/issues
 
         let recv_task = rx
             .into_stream()
-            .for_each(|item| async move {});
+            .enumerate()
+            .for_each(|(index, item)| async move {
+                assert_eq!(index, item);
+            });
         (send_task, recv_task)
     };
 
