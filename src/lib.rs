@@ -743,12 +743,8 @@ impl<T> Sender<T> {
         })
     }
 
-    /// Send a value into the channel, returning an error if all receivers have been dropped
-    /// or the deadline has passed. If the channel is bounded and is full, this method will
-    /// block until space is available, the deadline is reached, or all receivers have been
-    /// dropped.
-    pub fn send_deadline(&self, msg: T, deadline: Instant) -> Result<(), SendTimeoutError<T>> {
-        self.shared.send_sync(msg, Some(Some(deadline))).map_err(|err| match err {
+    fn send_deadline_inner(&self, msg: T, deadline: Option<Instant>) -> Result<(), SendTimeoutError<T>> {
+        self.shared.send_sync(msg, Some(deadline)).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendTimeoutError::Disconnected(msg),
             TrySendTimeoutError::Timeout(msg) => SendTimeoutError::Timeout(msg),
             _ => unreachable!(),
@@ -756,11 +752,19 @@ impl<T> Sender<T> {
     }
 
     /// Send a value into the channel, returning an error if all receivers have been dropped
+    /// or the deadline has passed. If the channel is bounded and is full, this method will
+    /// block until space is available, the deadline is reached, or all receivers have been
+    /// dropped.
+    pub fn send_deadline(&self, msg: T, deadline: Instant) -> Result<(), SendTimeoutError<T>> {
+        self.send_deadline_inner(msg, Some(deadline))
+    }
+
+    /// Send a value into the channel, returning an error if all receivers have been dropped
     /// or the timeout has expired. If the channel is bounded and is full, this method will
     /// block until space is available, the timeout has expired, or all receivers have been
     /// dropped.
     pub fn send_timeout(&self, msg: T, dur: Duration) -> Result<(), SendTimeoutError<T>> {
-        self.send_deadline(msg, Instant::now().checked_add(dur).unwrap())
+        self.send_deadline_inner(msg, Instant::now().checked_add(dur))
     }
 
     /// Returns true if all receivers for this channel have been dropped.
@@ -935,10 +939,8 @@ impl<T> Receiver<T> {
         })
     }
 
-    /// Wait for an incoming value from the channel associated with this receiver, returning an
-    /// error if all senders have been dropped or the deadline has passed.
-    pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        self.shared.recv_sync(Some(Some(deadline))).map_err(|err| match err {
+    fn recv_deadline_inner(&self, deadline: Option<Instant>) -> Result<T, RecvTimeoutError> {
+        self.shared.recv_sync(Some(deadline)).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
             TryRecvTimeoutError::Timeout => RecvTimeoutError::Timeout,
             _ => unreachable!(),
@@ -946,9 +948,15 @@ impl<T> Receiver<T> {
     }
 
     /// Wait for an incoming value from the channel associated with this receiver, returning an
+    /// error if all senders have been dropped or the deadline has passed.
+    pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
+        self.recv_deadline_inner(Some(deadline))
+    }
+
+    /// Wait for an incoming value from the channel associated with this receiver, returning an
     /// error if all senders have been dropped or the timeout has expired.
     pub fn recv_timeout(&self, dur: Duration) -> Result<T, RecvTimeoutError> {
-        self.recv_deadline(Instant::now().checked_add(dur).unwrap())
+        self.recv_deadline_inner(Instant::now().checked_add(dur))
     }
 
     /// Create a blocking iterator over the values received on the channel that finishes iteration
