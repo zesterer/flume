@@ -838,7 +838,7 @@ impl<T> Drop for Sender<T> {
 /// all normal [`Sender`]s are dropped, the channel is closed, even if there is still a
 /// `WeakSender`.
 ///
-/// To send messages, a `WeakSender` must first be upgraded to a `Sender` using the [`upgrade`]
+/// To send messages, a `WeakSender` must first be upgraded to a `Sender` using the [`WeakSender::upgrade`]
 /// method.
 pub struct WeakSender<T> {
     shared: Weak<Shared<T>>,
