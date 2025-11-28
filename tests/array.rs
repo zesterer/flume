@@ -9,10 +9,10 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
+use crossbeam_utils::thread::scope;
 use flume::{bounded, Receiver};
 use flume::{RecvError, RecvTimeoutError, TryRecvError};
 use flume::{SendError, SendTimeoutError, TrySendError};
-use crossbeam_utils::thread::scope;
 use rand::{thread_rng, Rng};
 
 fn ms(ms: u64) -> Duration {

@@ -1,4 +1,8 @@
-use std::{thread::{self, Thread}, time::Duration, any::Any};
+use std::{
+    any::Any,
+    thread::{self, Thread},
+    time::Duration,
+};
 
 pub trait Signal: Send + Sync + 'static {
     /// Fire the signal, returning whether it is a stream signal. This is because streams do not
@@ -23,11 +27,19 @@ impl Signal for SyncSignal {
         self.0.unpark();
         false
     }
-    fn as_any(&self) -> &(dyn Any + 'static) { self }
-    fn as_ptr(&self) -> *const () { self as *const _ as *const () }
+    fn as_any(&self) -> &(dyn Any + 'static) {
+        self
+    }
+    fn as_ptr(&self) -> *const () {
+        self as *const _ as *const ()
+    }
 }
 
 impl SyncSignal {
-    pub fn wait(&self) { thread::park(); }
-    pub fn wait_timeout(&self, dur: Duration) { thread::park_timeout(dur); }
+    pub fn wait(&self) {
+        thread::park();
+    }
+    pub fn wait_timeout(&self, dur: Duration) {
+        thread::park_timeout(dur);
+    }
 }

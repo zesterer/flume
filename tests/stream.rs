@@ -1,11 +1,11 @@
+use futures::{stream, Stream};
 #[cfg(all(feature = "async", not(target_os = "unknown")))]
 use {
+    async_std::prelude::FutureExt,
     flume::*,
     futures::{stream::FuturesUnordered, StreamExt, TryFutureExt},
-    async_std::prelude::FutureExt,
     std::time::Duration,
 };
-use futures::{stream, Stream};
 
 #[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
@@ -57,19 +57,14 @@ fn stream_recv_drop_recv() {
     let mut stream = rx.into_stream();
 
     async_std::task::block_on(async {
-        let res = async_std::future::timeout(
-            std::time::Duration::from_millis(500),
-            stream.next()
-        ).await;
+        let res =
+            async_std::future::timeout(std::time::Duration::from_millis(500), stream.next()).await;
 
         assert!(res.is_err());
     });
 
-    let t = std::thread::spawn(move || {
-        async_std::task::block_on(async {
-            rx2.stream().next().await
-        })
-    });
+    let t =
+        std::thread::spawn(move || async_std::task::block_on(async { rx2.stream().next().await }));
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -103,9 +98,7 @@ fn r#stream_drop_send_disconnect() {
 async fn stream_send_1_million_no_drop_or_reorder() {
     #[derive(Debug)]
     enum Message {
-        Increment {
-            old: u64,
-        },
+        Increment { old: u64 },
         ReturnCount,
     }
 
@@ -148,7 +141,7 @@ async fn parallel_streams_and_async_recv() {
     async_std::task::spawn(
         send_fut
             .timeout(Duration::from_secs(5))
-            .map_err(|_| panic!("Send timed out!"))
+            .map_err(|_| panic!("Send timed out!")),
     );
 
     let mut futures_unordered = (0..250)
@@ -159,13 +152,10 @@ async fn parallel_streams_and_async_recv() {
             } else {
                 while let Ok(()) = rx.recv_async().await {}
             }
-
         })
         .collect::<FuturesUnordered<_>>();
 
-    let recv_fut = async {
-        while futures_unordered.next().await.is_some() {}
-    };
+    let recv_fut = async { while futures_unordered.next().await.is_some() {} };
 
     recv_fut
         .timeout(Duration::from_secs(5))
@@ -177,12 +167,12 @@ async fn parallel_streams_and_async_recv() {
 #[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[test]
 fn stream_no_double_wake() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use std::pin::Pin;
-    use std::task::Context;
     use futures::task::{waker, ArcWake};
     use futures::Stream;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::Context;
 
     let count = Arc::new(AtomicUsize::new(0));
 
@@ -222,7 +212,8 @@ fn stream_no_double_wake() {
 
 #[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[async_std::test]
-async fn stream_forward_issue_55() { // https://github.com/zesterer/flume/issues/55
+async fn stream_forward_issue_55() {
+    // https://github.com/zesterer/flume/issues/55
     fn dummy_stream() -> impl Stream<Item = usize> {
         stream::unfold(0, |count| async move {
             if count < 1000 {
@@ -237,15 +228,12 @@ async fn stream_forward_issue_55() { // https://github.com/zesterer/flume/issues
         use futures::SinkExt;
         let (tx, rx) = flume::bounded(100);
 
-        let send_task = dummy_stream()
-            .map(|i| Ok(i))
-            .forward(tx.into_sink().sink_map_err(|e| {
-                panic!("send error:{:#?}", e)
-            }));
+        let send_task = dummy_stream().map(|i| Ok(i)).forward(
+            tx.into_sink()
+                .sink_map_err(|e| panic!("send error:{:#?}", e)),
+        );
 
-        let recv_task = rx
-            .into_stream()
-            .for_each(|item| async move {});
+        let recv_task = rx.into_stream().for_each(|item| async move {});
         (send_task, recv_task)
     };
 
