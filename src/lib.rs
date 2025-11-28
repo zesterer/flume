@@ -25,7 +25,7 @@
 //! assert_eq!(rx.recv().unwrap(), 42);
 //! ```
 
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(missing_docs)]
 
 #[cfg(feature = "select")]
@@ -838,7 +838,7 @@ impl<T> Drop for Sender<T> {
 /// all normal [`Sender`]s are dropped, the channel is closed, even if there is still a
 /// `WeakSender`.
 ///
-/// To send messages, a `WeakSender` must first be upgraded to a `Sender` using the [`upgrade`]
+/// To send messages, a `WeakSender` must first be upgraded to a `Sender` using the [`WeakSender::upgrade`]
 /// method.
 pub struct WeakSender<T> {
     shared: Weak<Shared<T>>,
