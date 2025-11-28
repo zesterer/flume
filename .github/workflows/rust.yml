@@ -13,7 +13,7 @@ jobs:
       RUST_BACKTRACE: 1
     strategy:
       matrix:
-        build: [linux64, macos, win32, win64, wasm32]
+        build: [linux64, win32, win64, wasm32]
         include:
           - build: linux64
             os: ubuntu-latest
@@ -25,11 +25,11 @@ jobs:
           #  channel: stable
           #  toolchain: i686-unknown-linux-gnu
           #  target: i686-unknown-linux-gnu
-          - build: macos
-            os: macos-latest
-            channel: stable
-            toolchain: x86_64-apple-darwin
-            target: x86_64-apple-darwin
+          #- build: macos
+          #  os: macos-latest
+          #  channel: stable
+          #  toolchain: x86_64-apple-darwin
+          #  target: x86_64-apple-darwin
           - build: win32
             os: windows-latest
             channel: stable
