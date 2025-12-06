@@ -61,7 +61,7 @@ jobs:
         rustup show
       shell: bash
     # Check build to fail fast
-    - run: cargo check --target ${{ matrix.target }}
+    - run: cargo check --tests --target ${{ matrix.target }}
     - run: cargo build --target ${{ matrix.target }}
     - run: cargo test --target ${{ matrix.target }}
       if: ${{ matrix.target != 'wasm32-unknown-unknown' }}
