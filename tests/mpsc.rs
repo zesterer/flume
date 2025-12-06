@@ -339,7 +339,9 @@ mod channel_tests {
             for _ in 0..AMT * NTHREADS {
                 assert_eq!(rx.recv().unwrap(), 1);
             }
-            if rx.try_recv().is_ok() { panic!() }
+            if rx.try_recv().is_ok() {
+                panic!()
+            }
         });
 
         let mut ts = Vec::with_capacity(NTHREADS as usize);
@@ -1174,7 +1176,9 @@ mod sync_channel_tests {
             for _ in 0..AMT * NTHREADS {
                 assert_eq!(rx.recv().unwrap(), 1);
             }
-            if rx.try_recv().is_ok() { panic!() }
+            if rx.try_recv().is_ok() {
+                panic!()
+            }
             dtx.send(()).unwrap();
         });
 
