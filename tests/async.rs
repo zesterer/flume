@@ -197,7 +197,7 @@ fn change_waker() {
             self.0.load(Ordering::SeqCst)
         }
 
-        fn ctx(&self) -> Context {
+        fn ctx(&self) -> Context<'_> {
             Context::from_waker(&self.1)
         }
     }
