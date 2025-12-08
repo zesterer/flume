@@ -94,11 +94,11 @@ impl<T> Receiver<T> {
         })
     }
 
-    pub fn iter(&self) -> Iter<T> {
+    pub fn iter(&self) -> Iter<'_, T> {
         Iter { inner: self }
     }
 
-    pub fn try_iter(&self) -> TryIter<T> {
+    pub fn try_iter(&self) -> TryIter<'_, T> {
         TryIter { inner: self }
     }
 }
@@ -339,9 +339,8 @@ mod channel_tests {
             for _ in 0..AMT * NTHREADS {
                 assert_eq!(rx.recv().unwrap(), 1);
             }
-            match rx.try_recv() {
-                Ok(..) => panic!(),
-                _ => {}
+            if rx.try_recv().is_ok() {
+                panic!()
             }
         });
 
@@ -883,7 +882,7 @@ mod channel_tests {
         };
         assert_eq!(iter.next().unwrap(), 1);
         assert_eq!(iter.next().unwrap(), 2);
-        assert_eq!(iter.next().is_none(), true);
+        assert!(iter.next().is_none());
     }
 
     #[test]
@@ -895,7 +894,7 @@ mod channel_tests {
         let mut iter = (&rx).into_iter();
         assert_eq!(iter.next().unwrap(), 1);
         assert_eq!(iter.next().unwrap(), 2);
-        assert_eq!(iter.next().is_none(), true);
+        assert!(iter.next().is_none());
     }
 
     #[test]
@@ -1177,9 +1176,8 @@ mod sync_channel_tests {
             for _ in 0..AMT * NTHREADS {
                 assert_eq!(rx.recv().unwrap(), 1);
             }
-            match rx.try_recv() {
-                Ok(..) => panic!(),
-                _ => {}
+            if rx.try_recv().is_ok() {
+                panic!()
             }
             dtx.send(()).unwrap();
         });
@@ -1688,17 +1686,17 @@ mod select_tests {
         tx1.send(1).unwrap();
         select! {
             foo = rx1.recv() => { assert_eq!(foo.unwrap(), 1); },
-            _bar = rx2.recv() => { panic!() }
+            _bar = rx2.recv() => panic!()
         }
         tx2.send(2).unwrap();
         select! {
-            _foo = rx1.recv() => { panic!() },
-            bar = rx2.recv() => { assert_eq!(bar.unwrap(), 2) }
+            _foo = rx1.recv() => panic!(),
+            bar = rx2.recv() => assert_eq!(bar.unwrap(), 2)
         }
         drop(tx1);
         select! {
             foo = rx1.recv() => { assert!(foo.is_err()); },
-            _bar = rx2.recv() => { panic!() }
+            _bar = rx2.recv() => panic!()
         }
         drop(tx2);
         select! {
@@ -1715,10 +1713,10 @@ mod select_tests {
         let (tx5, rx5) = channel::<i32>();
         tx5.send(4).unwrap();
         select! {
-            _foo = rx1.recv() => { panic!("1") },
-            _foo = rx2.recv() => { panic!("2") },
-            _foo = rx3.recv() => { panic!("3") },
-            _foo = rx4.recv() => { panic!("4") },
+            _foo = rx1.recv() => panic!("1"),
+            _foo = rx2.recv() => panic!("2"),
+            _foo = rx3.recv() => panic!("3"),
+            _foo = rx4.recv() => panic!("4"),
             foo = rx5.recv() => { assert_eq!(foo.unwrap(), 4); }
         }
     }
@@ -1730,7 +1728,7 @@ mod select_tests {
         drop(tx2);
 
         select! {
-            _a1 = rx1.recv() => { panic!() },
+            _a1 = rx1.recv() => panic!(),
             a2 = rx2.recv() => { assert!(a2.is_err()); }
         }
     }
@@ -1754,12 +1752,12 @@ mod select_tests {
 
         select! {
             a = rx1.recv() => { assert_eq!(a.unwrap(), 1); },
-            _b = rx2.recv() => { panic!() }
+            _b = rx2.recv() => panic!()
         }
         tx3.send(1).unwrap();
         select! {
-            a = rx1.recv() => { assert!(a.is_err()) },
-            _b = rx2.recv() => { panic!() }
+            a = rx1.recv() => assert!(a.is_err()),
+            _b = rx2.recv() => panic!()
         }
         t.join().unwrap();
     }

@@ -34,7 +34,7 @@ fn stream_recv_disconnect() {
     let (tx, rx) = bounded::<i32>(0);
 
     let t = std::thread::spawn(move || {
-        tx.send(42);
+        let _ = tx.send(42);
         std::thread::sleep(std::time::Duration::from_millis(250));
         drop(tx)
     });
@@ -228,12 +228,12 @@ async fn stream_forward_issue_55() {
         use futures::SinkExt;
         let (tx, rx) = flume::bounded(100);
 
-        let send_task = dummy_stream().map(|i| Ok(i)).forward(
+        let send_task = dummy_stream().map(Ok).forward(
             tx.into_sink()
                 .sink_map_err(|e| panic!("send error:{:#?}", e)),
         );
 
-        let recv_task = rx.into_stream().for_each(|item| async move {});
+        let recv_task = rx.into_stream().for_each(|_item| async move {});
         (send_task, recv_task)
     };
 

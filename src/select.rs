@@ -101,7 +101,7 @@ impl<'a, T> Selector<'a, T> {
             selections: Vec::new(),
             next_poll: 0,
             signalled: Arc::default(),
-            phantom: PhantomData::default(),
+            phantom: PhantomData,
             #[cfg(feature = "eventual-fairness")]
             rng: fastrand::Rng::new(),
         }
@@ -180,7 +180,7 @@ impl<'a, T> Selector<'a, T> {
                     return None;
                 };
 
-                Some((&mut self.mapper)(res))
+                Some((self.mapper)(res))
             }
 
             fn deinit(&mut self) {
@@ -274,7 +274,7 @@ impl<'a, T> Selector<'a, T> {
                     return None;
                 };
 
-                Some((&mut self.mapper)(res))
+                Some((self.mapper)(res))
             }
 
             fn deinit(&mut self) {
@@ -320,7 +320,7 @@ impl<'a, T> Selector<'a, T> {
             self.next_poll = self.rng.usize(0..self.selections.len());
         }
 
-        let res = 'outer: loop {
+        let res = 'outer: {
             // Init signals
             for _ in 0..self.selections.len() {
                 if let Some(val) = self.selections[self.next_poll].init() {

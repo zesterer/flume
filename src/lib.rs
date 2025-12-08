@@ -400,7 +400,7 @@ impl<T> Hook<T, SyncSignal> {
 
 #[cfg(feature = "spin")]
 #[inline]
-fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
+fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<'_, T> {
     // Some targets don't support `thread::sleep` (e.g. the `wasm32-unknown-unknown` target when
     // running in the main thread of a web browser) so we only use it on targets where we know it
     // will work
@@ -975,20 +975,20 @@ impl<T> Receiver<T> {
     /// when all senders have been dropped.
     ///
     /// You can also create a self-owned iterator with [`Receiver::into_iter`].
-    pub fn iter(&self) -> Iter<T> {
-        Iter { receiver: &self }
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter { receiver: self }
     }
 
     /// A non-blocking iterator over the values received on the channel that finishes iteration
     /// when all senders have been dropped or the channel is empty.
-    pub fn try_iter(&self) -> TryIter<T> {
-        TryIter { receiver: &self }
+    pub fn try_iter(&self) -> TryIter<'_, T> {
+        TryIter { receiver: self }
     }
 
     /// Take all msgs currently sitting in the channel and produce an iterator over them. Unlike
     /// `try_iter`, the iterator will not attempt to fetch any more values from the channel once
     /// the function has been called.
-    pub fn drain(&self) -> Drain<T> {
+    pub fn drain(&self) -> Drain<'_, T> {
         let mut chan = wait_lock(&self.shared.chan);
         chan.pull_pending(false);
         let queue = std::mem::take(&mut chan.queue);
