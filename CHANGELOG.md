@@ -15,6 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+# [0.12.0] - 2025-12-08
+
+### Added
+
+- `fastrand` feature
+
+### Removed
+
+- `nanorand` feature
+
+### Fixed
+
+- Panic when using `Duration::MAX` as timeout
+
 # [0.11.1] - 2024-10-19
 
 ### Added
