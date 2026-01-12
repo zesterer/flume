@@ -412,7 +412,12 @@ impl<'a, T> RecvFut<'a, T> {
         cx: &mut Context,
         stream: bool,
     ) -> Poll<Result<T, RecvError>> {
-        if self.hook.is_some() {
+        if let Some(hook) = self.hook.as_ref() {
+            // Check if message was delivered directly to our slot
+            if let Some(msg) = hook.try_take() {
+                return Poll::Ready(Ok(msg));
+            }
+            // Try to receive from queue
             match self.receiver.shared.recv_sync(None) {
                 Ok(msg) => return Poll::Ready(Ok(msg)),
                 Err(TryRecvTimeoutError::Disconnected) => {
@@ -421,13 +426,12 @@ impl<'a, T> RecvFut<'a, T> {
                 _ => (),
             }
 
-            let hook = self.hook.as_ref().map(Arc::clone).unwrap();
             if hook.update_waker(cx.waker()) {
                 // If the previous hook was awakened, we need to insert it back to the
                 // queue, otherwise, it remains valid.
                 wait_lock(&self.receiver.shared.chan)
                     .waiting
-                    .push_back(hook);
+                    .push_back(hook.clone());
             }
             // To avoid a missed wakeup, re-check disconnect status here because the channel might have
             // gotten shut down before we had a chance to push our hook
@@ -452,8 +456,8 @@ impl<'a, T> RecvFut<'a, T> {
                 .recv(
                     // should_block
                     true,
-                    // make_signal
-                    || Hook::trigger(AsyncSignal::new(cx, stream)),
+                    // make_signal - use slot instead of trigger for proper rendezvous semantics
+                    || Hook::slot(None, AsyncSignal::new(cx, stream)),
                     // do_block
                     |hook| {
                         *this_hook = Some(hook);
