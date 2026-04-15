@@ -111,24 +111,41 @@ impl<'a, T> Selector<'a, T> {
     ///
     /// Once added, the selector can be used to run the provided handler function on completion of this operation.
     pub fn send<U, F: FnOnce(Result<(), SendError<U>>) -> T + 'a>(
-        mut self,
+        self,
         sender: &'a Sender<U>,
         msg: U,
         mapper: F,
     ) -> Self {
-        struct SendSelection<'a, T, F, U> {
+        self.send_or_else(sender, msg, mapper, |_| {})
+    }
+
+    /// Add a send operation to the selector that sends the provided value.
+    ///
+    /// Once added, the selector can be used to run the provided handler function on completion of this operation.
+    ///
+    /// If another operation completes first, call the alternative handler instead.
+    pub fn send_or_else<U, F: FnOnce(Result<(), SendError<U>>) -> T + 'a, O: FnOnce(U) + 'a>(
+        mut self,
+        sender: &'a Sender<U>,
+        msg: U,
+        mapper: F,
+        or_else: O,
+    ) -> Self {
+        struct SendSelection<'a, T, F, O, U> {
             sender: &'a Sender<U>,
             msg: Option<U>,
             token: Token,
             signalled: Arc<Spinlock<VecDeque<Token>>>,
             hook: Option<Arc<Hook<U, SelectSignal>>>,
             mapper: Option<F>,
+            or_else: Option<O>,
             phantom: PhantomData<T>,
         }
 
-        impl<'a, T, F, U> Selection<'a, T> for SendSelection<'a, T, F, U>
+        impl<'a, T, F, O, U> Selection<'a, T> for SendSelection<'a, T, F, O, U>
         where
             F: FnOnce(Result<(), SendError<U>>) -> T,
+            O: FnOnce(U),
         {
             fn init(&mut self) -> Option<T> {
                 let token = self.token;
@@ -184,6 +201,10 @@ impl<'a, T> Selector<'a, T> {
             }
 
             fn deinit(&mut self) {
+                if let Some(msg) = self.msg.take() {
+                    (self.or_else.take().unwrap())(msg);
+                }
+
                 if let Some(hook) = self.hook.take() {
                     // Remove hook
                     let hook: Arc<Hook<U, dyn Signal>> = hook;
@@ -193,6 +214,10 @@ impl<'a, T> Selector<'a, T> {
                         .unwrap()
                         .1
                         .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
+
+                    if let Some(msg) = hook.try_take() {
+                        (self.or_else.take().unwrap())(msg);
+                    }
                 }
             }
         }
@@ -205,6 +230,7 @@ impl<'a, T> Selector<'a, T> {
             signalled: self.signalled.clone(),
             hook: None,
             mapper: Some(mapper),
+            or_else: Some(or_else),
             phantom: Default::default(),
         }));
 
