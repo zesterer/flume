@@ -110,7 +110,7 @@ impl<'a, T> Selector<'a, T> {
     /// Add a send operation to the selector that sends the provided value.
     ///
     /// Once added, the selector can be used to run the provided handler function on completion of this operation.
-    pub fn send<U, F: FnMut(Result<(), SendError<U>>) -> T + 'a>(
+    pub fn send<U, F: FnOnce(Result<(), SendError<U>>) -> T + 'a>(
         mut self,
         sender: &'a Sender<U>,
         msg: U,
@@ -122,13 +122,13 @@ impl<'a, T> Selector<'a, T> {
             token: Token,
             signalled: Arc<Spinlock<VecDeque<Token>>>,
             hook: Option<Arc<Hook<U, SelectSignal>>>,
-            mapper: F,
+            mapper: Option<F>,
             phantom: PhantomData<T>,
         }
 
         impl<'a, T, F, U> Selection<'a, T> for SendSelection<'a, T, F, U>
         where
-            F: FnMut(Result<(), SendError<U>>) -> T,
+            F: FnOnce(Result<(), SendError<U>>) -> T,
         {
             fn init(&mut self) -> Option<T> {
                 let token = self.token;
@@ -155,7 +155,7 @@ impl<'a, T> Selector<'a, T> {
                 );
 
                 if self.hook.is_none() {
-                    Some((self.mapper)(match r {
+                    Some((self.mapper.take().unwrap())(match r {
                         Ok(()) => Ok(()),
                         Err(TrySendTimeoutError::Disconnected(msg)) => Err(SendError(msg)),
                         _ => unreachable!(),
@@ -180,7 +180,7 @@ impl<'a, T> Selector<'a, T> {
                     return None;
                 };
 
-                Some((self.mapper)(res))
+                Some((self.mapper.take().unwrap())(res))
             }
 
             fn deinit(&mut self) {
@@ -204,7 +204,7 @@ impl<'a, T> Selector<'a, T> {
             token,
             signalled: self.signalled.clone(),
             hook: None,
-            mapper,
+            mapper: Some(mapper),
             phantom: Default::default(),
         }));
 
@@ -214,7 +214,7 @@ impl<'a, T> Selector<'a, T> {
     /// Add a receive operation to the selector.
     ///
     /// Once added, the selector can be used to run the provided handler function on completion of this operation.
-    pub fn recv<U, F: FnMut(Result<U, RecvError>) -> T + 'a>(
+    pub fn recv<U, F: FnOnce(Result<U, RecvError>) -> T + 'a>(
         mut self,
         receiver: &'a Receiver<U>,
         mapper: F,
@@ -224,14 +224,14 @@ impl<'a, T> Selector<'a, T> {
             token: Token,
             signalled: Arc<Spinlock<VecDeque<Token>>>,
             hook: Option<Arc<Hook<U, SelectSignal>>>,
-            mapper: F,
+            mapper: Option<F>,
             received: bool,
             phantom: PhantomData<T>,
         }
 
         impl<'a, T, F, U> Selection<'a, T> for RecvSelection<'a, T, F, U>
         where
-            F: FnMut(Result<U, RecvError>) -> T,
+            F: FnOnce(Result<U, RecvError>) -> T,
         {
             fn init(&mut self) -> Option<T> {
                 let token = self.token;
@@ -254,7 +254,7 @@ impl<'a, T> Selector<'a, T> {
                 );
 
                 if self.hook.is_none() {
-                    Some((self.mapper)(match r {
+                    Some((self.mapper.take().unwrap())(match r {
                         Ok(msg) => Ok(msg),
                         Err(TryRecvTimeoutError::Disconnected) => Err(RecvError::Disconnected),
                         _ => unreachable!(),
@@ -274,7 +274,7 @@ impl<'a, T> Selector<'a, T> {
                     return None;
                 };
 
-                Some((self.mapper)(res))
+                Some((self.mapper.take().unwrap())(res))
             }
 
             fn deinit(&mut self) {
@@ -306,7 +306,7 @@ impl<'a, T> Selector<'a, T> {
             token,
             signalled: self.signalled.clone(),
             hook: None,
-            mapper,
+            mapper: Some(mapper),
             received: false,
             phantom: Default::default(),
         }));

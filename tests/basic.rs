@@ -340,8 +340,12 @@ fn select_general() {
         });
     }
 
+    let token = Box::new(());
     let x = Selector::new()
-        .recv(&rx0, |x| x)
+        .recv(&rx0, |x| {
+            drop(token);
+            x
+        })
         .recv(&rx1, |x| x)
         .wait()
         .unwrap();
@@ -360,7 +364,14 @@ fn select_general() {
         assert_eq!(rx0.recv().unwrap(), Foo(43));
     });
 
-    Selector::new().send(&tx0, Foo(43), |x| x).wait().unwrap();
+    let token = Box::new(());
+    Selector::new()
+        .send(&tx0, Foo(43), |x| {
+            drop(token);
+            x
+        })
+        .wait()
+        .unwrap();
 
     t.join().unwrap();
 }
