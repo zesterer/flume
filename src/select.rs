@@ -315,9 +315,16 @@ impl<'a, T> Selector<'a, T> {
     }
 
     fn wait_inner(mut self, deadline: Option<Instant>) -> Option<T> {
+        if deadline.is_none() && self.selections.is_empty() {
+            // Would block forever
+            return None;
+        }
+
         #[cfg(feature = "eventual-fairness")]
         {
-            self.next_poll = self.rng.usize(0..self.selections.len());
+            if !self.selections.is_empty() {
+                self.next_poll = self.rng.usize(0..self.selections.len());
+            }
         }
 
         let res = 'outer: {
@@ -381,13 +388,20 @@ impl<'a, T> Selector<'a, T> {
 
     /// Wait until one of the events associated with this [`Selector`] has completed. If the `eventual-fairness`
     /// feature flag is enabled, this method is fair and will handle a random event of those that are ready.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if there are no events associated with this [`Selector`], instead of blocking forever.
     pub fn wait(self) -> T {
-        self.wait_inner(None).unwrap()
+        self.wait_inner(None)
+            .expect("wait list should not be empty")
     }
 
     /// Wait until one of the events associated with this [`Selector`] has completed or the timeout has expired. If the
     /// `eventual-fairness` feature flag is enabled, this method is fair and will handle a random event of those that
     /// are ready.
+    ///
+    /// If there are no events associated with this [`Selector`], this method waits for the given duration and then returns [`SelectError::Timeout`].
     pub fn wait_timeout(self, dur: Duration) -> Result<T, SelectError> {
         self.wait_inner(Instant::now().checked_add(dur))
             .ok_or(SelectError::Timeout)
@@ -396,6 +410,8 @@ impl<'a, T> Selector<'a, T> {
     /// Wait until one of the events associated with this [`Selector`] has completed or the deadline has been reached.
     /// If the `eventual-fairness` feature flag is enabled, this method is fair and will handle a random event of those
     /// that are ready.
+    ///
+    /// If there are no events associated with this [`Selector`], this method waits for the given deadline and then returns [`SelectError::Timeout`].
     pub fn wait_deadline(self, deadline: Instant) -> Result<T, SelectError> {
         self.wait_inner(Some(deadline)).ok_or(SelectError::Timeout)
     }

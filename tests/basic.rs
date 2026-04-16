@@ -365,6 +365,23 @@ fn select_general() {
     t.join().unwrap();
 }
 
+#[cfg(feature = "select")]
+#[test]
+#[should_panic]
+fn wait_on_empty_selector_panics() {
+    Selector::<()>::new().wait();
+}
+
+#[cfg(feature = "select")]
+#[test]
+fn wait_timeout_on_empty_selector_times_out() {
+    let start = Instant::now();
+    let result = Selector::<()>::new().wait_timeout(Duration::from_millis(10));
+    let elapsed = Instant::now().duration_since(start);
+    assert!(result.is_err());
+    assert!(elapsed >= Duration::from_millis(10));
+}
+
 struct MessageWithoutDebug(u32);
 
 #[test]
