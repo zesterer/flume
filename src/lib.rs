@@ -293,7 +293,7 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
     }
 
     fn lock(&self) -> Option<MutexGuard<'_, Option<T>>> {
-        self.0.as_ref().map(|s| s.lock().unwrap())
+        self.0.as_ref().map(|s| platform_lock(s).unwrap())
     }
 }
 
@@ -426,11 +426,24 @@ fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<'_, T> {
 #[cfg(not(feature = "spin"))]
 #[inline]
 fn wait_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
-    lock.lock().unwrap()
+    platform_lock(lock).unwrap()
 }
 
-#[cfg(not(feature = "spin"))]
+#[cfg(all(not(feature = "spin"), not(target_family = "wasm")))]
 use std::sync::{Mutex, MutexGuard};
+#[cfg(all(not(feature = "spin"), target_family = "wasm"))]
+use wasm_safe_mutex::{Guard as MutexGuard, Mutex};
+
+#[cfg(not(target_family = "wasm"))]
+fn platform_lock<'a, T>(mutex: &'a Mutex<T>) -> std::sync::LockResult<MutexGuard<'a, T>> {
+    mutex.lock()
+}
+#[cfg(target_family = "wasm")]
+fn platform_lock<'a, T>(
+    mutex: &'a Mutex<T>,
+) -> Result<MutexGuard<'a, T>, std::convert::Infallible> {
+    Ok(mutex.lock_sync())
+}
 
 #[cfg(feature = "spin")]
 type ChanLock<T> = Spinlock<T>;
