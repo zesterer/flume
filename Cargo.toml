@@ -9,7 +9,7 @@ repository = "https://github.com/zesterer/flume"
 documentation = "https://docs.rs/flume"
 keywords = ["mpsc", "fifo", "channel", "thread", "mpmc"]
 categories = ["concurrency", "data-structures"]
-license = "Apache-2.0/MIT"
+license = "MIT OR Apache-2.0"
 readme = "README.md"
 exclude = [
     "/.github",
