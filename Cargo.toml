@@ -28,7 +28,7 @@ eventual-fairness = ["select", "fastrand"]
 default = ["async", "select", "eventual-fairness"]
 
 [dependencies]
-spin1 = { package = "spin", version = "0.9.8", features = ["mutex"] }
+spin1 = { package = "spin", version = "0.10", features = ["mutex"] }
 futures-sink = { version = "0.3", default-features = false, optional = true }
 futures-core = { version = "0.3", default-features = false, optional = true }
 fastrand = { version = "2.3", features = ["std", "js"], optional = true }
