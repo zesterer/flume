@@ -308,7 +308,7 @@ fn test_mpsc_bounded<S: Sender>(b: &mut Bencher, bound: usize, thread_num: usize
             for _ in 0..thread_num {
                 let tx = tx.clone();
                 scope.spawn(move |_| {
-                    for _ in 0..msgs / thread_num as usize {
+                    for _ in 0..msgs / thread_num {
                         tx.send(Default::default());
                     }
                 });
@@ -316,7 +316,7 @@ fn test_mpsc_bounded<S: Sender>(b: &mut Bencher, bound: usize, thread_num: usize
 
             scope.spawn(move |_| {
                 // Remainder
-                for _ in 0..msgs - (msgs / thread_num as usize * thread_num) {
+                for _ in 0..msgs - (msgs / thread_num * thread_num) {
                     tx.send(Default::default());
                 }
             });
