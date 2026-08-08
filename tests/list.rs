@@ -225,6 +225,36 @@ fn len() {
 }
 
 #[test]
+fn shrink_to_fit() {
+    let (s, r) = unbounded();
+
+    assert_eq!(s.len(), 0);
+    assert_eq!(r.len(), 0);
+
+    for i in 0..50 {
+        s.send(i).unwrap();
+        assert_eq!(s.len(), i + 1);
+    }
+
+    // Rust's collections always allocate
+    // some extra space to prevent reallocations.
+    assert!(s.queue_capacity() > 50);
+    assert!(r.queue_capacity() > 50);
+
+    for i in 0..50 {
+        r.recv().unwrap();
+        assert_eq!(r.len(), 50 - i - 1);
+    }
+    r.shrink_to_fit();
+    s.shrink_to_fit();
+
+    assert_eq!(s.queue_capacity(), 0);
+    assert_eq!(r.queue_capacity(), 0);
+    assert_eq!(s.len(), 0);
+    assert_eq!(r.len(), 0);
+}
+
+#[test]
 fn disconnect_wakes_receiver() {
     let (s, r) = unbounded::<()>();
 
