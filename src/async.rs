@@ -412,7 +412,7 @@ impl<'a, T> RecvFut<'a, T> {
         cx: &mut Context,
         stream: bool,
     ) -> Poll<Result<T, RecvError>> {
-        if self.hook.is_some() {
+        if let Some(hook) = self.hook.as_ref() {
             match self.receiver.shared.recv_sync(None) {
                 Ok(msg) => return Poll::Ready(Ok(msg)),
                 Err(TryRecvTimeoutError::Disconnected) => {
@@ -421,26 +421,29 @@ impl<'a, T> RecvFut<'a, T> {
                 _ => (),
             }
 
-            let hook = self.hook.as_ref().map(Arc::clone).unwrap();
-            if hook.update_waker(cx.waker()) {
-                // If the previous hook was awakened, we need to insert it back to the
-                // queue, otherwise, it remains valid.
-                wait_lock(&self.receiver.shared.chan)
-                    .waiting
-                    .push_back(hook);
-            }
-            // To avoid a missed wakeup, re-check disconnect status here because the channel might have
-            // gotten shut down before we had a chance to push our hook
-            if self.receiver.shared.is_disconnected() {
-                // And now, to avoid a race condition between the first recv attempt and the disconnect check we
-                // just performed, attempt to recv again just in case we missed something.
-                Poll::Ready(
-                    self.receiver
-                        .shared
-                        .recv_sync(None)
-                        .map(Ok)
-                        .unwrap_or(Err(RecvError::Disconnected)),
-                )
+            let woken = hook.update_waker(cx.waker());
+            // If the previous hook was awakened, we need to insert it back to the
+            // queue, otherwise, it remains valid.
+            if woken {
+                // To avoid a missed wakeup, atomically check messages/disconnected and insert the
+                // hook while holding chan lock.
+                //
+                // This is a simplified copy of `Shared::recv` to avoid an unnecessary
+                // Arc clone.
+                let mut chan = wait_lock(&self.receiver.shared.chan);
+                chan.pull_pending(true);
+
+                if let Some(msg) = chan.queue.pop_front() {
+                    drop(chan);
+                    Poll::Ready(Ok(msg))
+                } else if self.is_disconnected() {
+                    drop(chan);
+                    Poll::Ready(Err(RecvError::Disconnected))
+                } else {
+                    chan.waiting.push_back(Arc::clone(hook) as _);
+                    drop(chan);
+                    Poll::Pending
+                }
             } else {
                 Poll::Pending
             }
