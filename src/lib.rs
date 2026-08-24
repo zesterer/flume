@@ -838,6 +838,19 @@ impl<T> Sender<T> {
     pub fn same_channel(&self, other: &Sender<T>) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
+
+    /// Create a new [`Receiver`] for the same channel as this sender.
+    ///
+    /// This is handy when only one half of the channel is stored somewhere (such as inside a
+    /// data structure) and the other half needs to be recovered without threading it through
+    /// separately. If every receiver has already been dropped, the returned receiver will
+    /// observe the channel as disconnected, just as the sender does.
+    pub fn make_receiver(&self) -> Receiver<T> {
+        self.shared.receiver_count.fetch_add(1, Ordering::Relaxed);
+        Receiver {
+            shared: self.shared.clone(),
+        }
+    }
 }
 
 impl<T> Clone for Sender<T> {
@@ -1039,6 +1052,19 @@ impl<T> Receiver<T> {
     /// Returns whether the receivers are belong to the same channel.
     pub fn same_channel(&self, other: &Receiver<T>) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    /// Create a new [`Sender`] for the same channel as this receiver.
+    ///
+    /// This is handy when only one half of the channel is stored somewhere (such as inside a
+    /// data structure) and the other half needs to be recovered without threading it through
+    /// separately. If every sender has already been dropped, the returned sender will observe
+    /// the channel as disconnected, just as the receiver does.
+    pub fn make_sender(&self) -> Sender<T> {
+        self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
+        Sender {
+            shared: self.shared.clone(),
+        }
     }
 }
 

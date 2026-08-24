@@ -454,3 +454,40 @@ fn weak_upgrade() {
     tx2.send(()).unwrap();
     assert!(rx.try_recv().is_ok());
 }
+
+#[test]
+fn make_receiver() {
+    let (tx, rx) = unbounded();
+    let rx2 = tx.make_receiver();
+    assert!(rx.same_channel(&rx2));
+    assert_eq!(tx.receiver_count(), 2);
+
+    tx.send(42).unwrap();
+    // A message is only received by a single receiver, so exactly one of the two gets it.
+    let a = rx.try_recv().ok();
+    let b = rx2.try_recv().ok();
+    assert_eq!(a.or(b), Some(42));
+
+    // The channel stays open as long as the recovered receiver lives.
+    drop(rx);
+    assert!(!tx.is_disconnected());
+    drop(rx2);
+    assert!(tx.is_disconnected());
+}
+
+#[test]
+fn make_sender() {
+    let (tx, rx) = unbounded();
+    let tx2 = rx.make_sender();
+    assert!(tx.same_channel(&tx2));
+    assert_eq!(rx.sender_count(), 2);
+
+    tx2.send(1).unwrap();
+    assert_eq!(rx.try_recv().unwrap(), 1);
+
+    // The channel stays open as long as the recovered sender lives.
+    drop(tx);
+    assert!(!rx.is_disconnected());
+    drop(tx2);
+    assert!(rx.is_disconnected());
+}
