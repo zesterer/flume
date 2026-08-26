@@ -425,9 +425,15 @@ impl<'a, T> RecvFut<'a, T> {
             if hook.update_waker(cx.waker()) {
                 // If the previous hook was awakened, we need to insert it back to the
                 // queue, otherwise, it remains valid.
-                wait_lock(&self.receiver.shared.chan)
-                    .waiting
-                    .push_back(hook);
+                let mut chan = wait_lock(&self.receiver.shared.chan);
+                // Clear the `woken` flag now that the hook is being re-armed and
+                // re-inserted into the waiting queue. Without this, every later poll
+                // that fails to receive a message would see `woken` still set and push
+                // yet another duplicate copy of the same hook, growing `waiting`
+                // without bound (issue #182). `fire` also runs under this lock and the
+                // hook is not currently in `waiting`, so this reset is race-free.
+                hook.signal().woken.store(false, Ordering::SeqCst);
+                chan.waiting.push_back(hook);
             }
             // To avoid a missed wakeup, re-check disconnect status here because the channel might have
             // gotten shut down before we had a chance to push our hook
@@ -588,5 +594,54 @@ impl<'a, T> Stream for RecvStream<'a, T> {
 impl<'a, T> FusedStream for RecvStream<'a, T> {
     fn is_terminated(&self) -> bool {
         self.0.is_terminated()
+    }
+}
+
+#[cfg(test)]
+mod issue_182 {
+    use crate::*;
+    use std::future::Future;
+    use std::task::Context;
+
+    fn waiting_len<T>(rx: &Receiver<T>) -> usize {
+        super::super::wait_lock(&rx.shared.chan).waiting.len()
+    }
+
+    // Reproduces issue #182: when an async recv future is polled repeatedly
+    // after its hook was fired but it failed to actually receive a message
+    // (the message was stolen by another receiver), each poll pushes another
+    // clone of the same hook onto the `waiting` queue without bound.
+    #[test]
+    fn duplicate_hooks_grow_waiting_queue() {
+        let (tx, rx) = crate::unbounded::<u32>();
+
+        let waker = waker_fn::waker_fn(|| {});
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll: registers a hook in `waiting`, returns Pending.
+        let mut fut = Box::pin(rx.recv_async());
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(waiting_len(&rx), 1, "one hook after first poll");
+
+        // Fire the hook (send), then steal the message via try_recv so the
+        // hook's own recv will fail: hook is now woken=true and removed from
+        // `waiting`, and the queue is empty.
+        tx.send(1).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), 1);
+        assert_eq!(waiting_len(&rx), 0, "hook removed from waiting when fired");
+
+        // Now poll the same future several times. Each poll fails to receive
+        // (queue empty) but re-inserts the hook because `woken` is still set.
+        for _ in 0..10 {
+            assert!(fut.as_mut().poll(&mut cx).is_pending());
+        }
+
+        let len = waiting_len(&rx);
+        println!("waiting queue length after 10 spurious polls = {}", len);
+        assert_eq!(
+            len, 1,
+            "waiting queue must hold at most one hook per receiver, got {}",
+            len
+        );
     }
 }
