@@ -342,6 +342,8 @@ impl<'a, T> Clone for SendSink<'a, T> {
 impl<T> Receiver<T> {
     /// Asynchronously receive a value from the channel, returning an error if all senders have been
     /// dropped. If the channel is empty, the returned future will yield to the async runtime.
+    ///
+    /// See [`RecvFut`] for how dropping the returned future affects other receivers.
     pub fn recv_async(&self) -> RecvFut<'_, T> {
         RecvFut::new(OwnedOrRef::Ref(self))
     }
@@ -349,6 +351,8 @@ impl<T> Receiver<T> {
     /// Convert this receiver into a future that asynchronously receives a single message from the
     /// channel, returning an error if all senders have been dropped. If the channel is empty, this
     /// future will yield to the async runtime.
+    ///
+    /// See [`RecvFut`] for how dropping the returned future affects other receivers.
     pub fn into_recv_async<'a>(self) -> RecvFut<'a, T> {
         RecvFut::new(OwnedOrRef::Owned(self))
     }
@@ -368,6 +372,14 @@ impl<T> Receiver<T> {
 /// A future which allows asynchronously receiving a message.
 ///
 /// Can be created via [`Receiver::recv_async`] or [`Receiver::into_recv_async`].
+///
+/// # Wakeups
+///
+/// Dropping this future after the channel has woken it, whether it completed or you
+/// cancelled it, passes the wakeup on to the other waiting receivers in queue order
+/// while the channel is non-empty, stopping after the first [`RecvStream`]. This keeps
+/// the future cancel safe. With many receivers on one channel, it can cause a burst of
+/// spurious wakeups.
 #[must_use = "futures/streams/sinks do nothing unless you `.await` or poll them"]
 pub struct RecvFut<'a, T> {
     receiver: OwnedOrRef<'a, Receiver<T>>,
