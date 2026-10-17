@@ -34,6 +34,9 @@ futures-sink = { version = "0.3", default-features = false, optional = true }
 futures-core = { version = "0.3", default-features = false, optional = true }
 fastrand = { version = "2.3", features = ["std", "js"], optional = true }
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm_safe_mutex = { version = "0.2.0" }
+
 [dev-dependencies]
 #flume-test = { path = "../flume-test" }
 crossbeam-channel = "0.5.5"
