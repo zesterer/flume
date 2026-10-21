@@ -141,7 +141,7 @@ async fn r#async_send_1_million_no_drop_or_reorder() {
 
 #[cfg(all(feature = "async", not(target_os = "unknown")))]
 #[async_std::test]
-async fn parallel_async_receivers() {
+async fn concurrent_async_receivers() {
     let (tx, rx) = flume::unbounded();
     let send_fut = async move {
         let n_sends: usize = 100000;
@@ -173,6 +173,38 @@ async fn parallel_async_receivers() {
         .unwrap();
 
     println!("recv end");
+}
+
+#[cfg(all(feature = "async", not(target_os = "unknown")))]
+#[async_std::test]
+async fn parallel_async_receivers_woken() {
+    let n_rounds = 1000;
+    let n_receivers = 16;
+
+    for _ in 0..n_rounds {
+        let (tx, rx) = flume::unbounded();
+        // Each receiver consumes exactly one message.
+        let mut futures_unordered = (0..n_receivers)
+            .map(|_| {
+                let rx = rx.clone();
+                async_std::task::spawn(async move {
+                    rx.recv_async().await.map_err(|_| panic!("recv error"))
+                })
+            })
+            .collect::<FuturesUnordered<_>>();
+
+        for _ in 0..n_receivers {
+            tx.send(()).unwrap();
+        }
+        // Wait for recv's to complete.
+        while futures_unordered
+            .next()
+            .timeout(Duration::from_secs(5))
+            .await
+            .expect("Timed out!")
+            .is_some()
+        {}
+    }
 }
 
 #[cfg(all(feature = "async", not(target_os = "unknown")))]
