@@ -333,15 +333,19 @@ fn select_general() {
     let (tx0, rx0) = bounded(1);
     let (tx1, rx1) = unbounded();
 
-    for (i, t) in vec![tx0.clone(), tx1].into_iter().enumerate() {
+    for (i, t) in vec![tx0.clone(), tx1.clone()].into_iter().enumerate() {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(250));
             let _ = t.send(Foo(i));
         });
     }
 
+    let token = Box::new(());
     let x = Selector::new()
-        .recv(&rx0, |x| x)
+        .recv(&rx0, |x| {
+            drop(token);
+            x
+        })
         .recv(&rx1, |x| x)
         .wait()
         .unwrap();
@@ -360,9 +364,47 @@ fn select_general() {
         assert_eq!(rx0.recv().unwrap(), Foo(43));
     });
 
-    Selector::new().send(&tx0, Foo(43), |x| x).wait().unwrap();
+    let token = Box::new(());
+    Selector::new()
+        .send(&tx0, Foo(43), |x| {
+            drop(token);
+            x
+        })
+        .wait()
+        .unwrap();
 
     t.join().unwrap();
+
+    let mut else0 = None;
+    let mut else1 = None;
+    let res = Selector::new()
+        .send_or_else(
+            &tx0,
+            Foo(44),
+            |x| {
+                x.unwrap_err();
+                0
+            },
+            |x| else0 = Some(x),
+        )
+        .send_or_else(
+            &tx1,
+            Foo(45),
+            |x| {
+                x.unwrap();
+                1
+            },
+            |x| else1 = Some(x),
+        )
+        .wait();
+
+    if res == 0 {
+        assert_eq!(else0, None);
+        assert_eq!(else1, Some(Foo(45)));
+    } else {
+        assert_eq!(else0, Some(Foo(44)));
+        assert_eq!(else1, None);
+    }
 }
 
 #[cfg(feature = "select")]
