@@ -883,6 +883,7 @@ impl<T> WeakSender<T> {
     ///
     /// Returns `None` if the channel was closed already. Note that a `Some` return value
     /// does not guarantee that the channel is still open.
+    #[expect(deprecated, reason = "Using fetch_update despite the rename, because MSRV")]
     pub fn upgrade(&self) -> Option<Sender<T>> {
         self.shared
             .upgrade()
