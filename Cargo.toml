@@ -39,7 +39,7 @@ fastrand = { version = "2.3", features = ["std", "js"], optional = true }
 crossbeam-channel = "0.5.5"
 crossbeam-utils = "0.8.10"
 criterion = { version = "0.5.1", default-features = false }
-rand = "0.8.3"
+rand = "0.9.5"
 async-std = { version = "1.13.0", features = ["attributes", "unstable"] }
 futures = { version = "^0.3", features = ["std"] }
 waker-fn = "1.1.0"
