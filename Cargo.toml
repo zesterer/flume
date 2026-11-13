@@ -44,7 +44,10 @@ async-std = { version = "1.13.0", features = ["attributes", "unstable"] }
 futures = { version = "^0.3", features = ["std"] }
 waker-fn = "1.1.0"
 tokio = { version = "^1.16.1", features = ["rt", "macros"] }
-getrandom = { version = "0.2.15", features = ["js"] }
+getrandom = { version = "0.3.4" }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+getrandom = { version = "0.3.4", default-features = false, features = ["wasm_js"] }
 
 [[bench]]
 name = "basic"
